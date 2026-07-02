@@ -1,0 +1,20 @@
+[package]
+name = "floonet-mixexit"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Scoped mixnet exit bundled with a Floonet relay: pipes accepted mixnet streams to ONE fixed upstream (never arbitrary targets)."
+
+## Pinned upstream nym rev. This is the same nym-sdk revision the Goblin
+## wallet builds against (its `goblin` branch is this rev plus one
+## Android-only TLS-roots commit), so both ends speak the same MixnetStream
+## protocol. Developing against a local nym checkout instead:
+##   cargo build --config 'patch."https://github.com/nymtech/nym".nym-sdk.path="../../nym/sdk/rust/nym-sdk"'
+[dependencies]
+nym-sdk = { git = "https://github.com/nymtech/nym", rev = "b6eb391e85be7eb8fca62def6d1ac32fd1108c30" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal"] }
+## Only to surface nym-sdk's tracing logs (RUST_LOG-style filtering).
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+strip = true

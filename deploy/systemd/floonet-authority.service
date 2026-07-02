@@ -1,0 +1,64 @@
+# Hardened systemd unit for the Floonet name authority on bare metal.
+#
+# Install:
+#   cd name-authority && cargo build --release
+#   sudo install -m0755 target/release/floonet-name-authority /usr/local/bin/
+#   sudo install -m0640 ../.env /etc/floonet-authority.env    # see .env.example
+#   sudo install -m0644 ../deploy/systemd/floonet-authority.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now floonet-authority
+#
+# The service stores only public data plus payment grant state, but it is
+# still locked down: dynamic unprivileged user, read-only system, no new
+# privileges. Keep the GoblinPay token out of world-readable files (the env
+# file above is 0640, or use GOBLINPAY_TOKEN_FILE pointing at a 0400 file).
+
+[Unit]
+Description=Floonet name authority (name@domain -> nostr pubkey)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# DynamicUser allocates a throwaway unprivileged user at runtime. If you need
+# a stable owner for the data dir, comment this out and set `User=floonet`
+# (create the user first).
+DynamicUser=yes
+
+# Identity/config. Edit /etc/floonet-authority.env (copy of .env.example).
+EnvironmentFile=/etc/floonet-authority.env
+
+# Managed state at /var/lib/floonet-authority (created and chowned by systemd).
+StateDirectory=floonet-authority
+StateDirectoryMode=0750
+Environment=FLOONET_NAMES_DB=/var/lib/floonet-authority/names.db
+
+ExecStart=/usr/local/bin/floonet-name-authority
+Restart=on-failure
+RestartSec=2
+
+# --- hardening ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# Only the state directory is writable.
+ReadWritePaths=/var/lib/floonet-authority
+# No raw sockets; only IP.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

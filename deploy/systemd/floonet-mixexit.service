@@ -1,0 +1,59 @@
+# Hardened systemd unit for the bundled mixnet exit on bare metal.
+#
+# Install:
+#   cd mixexit && cargo build --release
+#   sudo install -m0755 target/release/floonet-mixexit /usr/local/bin/
+#   sudo install -m0644 ../deploy/systemd/floonet-mixexit.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now floonet-mixexit
+#
+# The exit pipes every accepted mixnet stream to ONE fixed upstream (your own
+# relay's TLS front) and honors no per-stream targets, so it is structurally
+# not an open proxy. Its mixnet identity persists in the state directory:
+# back it up, losing it rotates the exit's address and strands wallet pins.
+# After first start, publish the address from
+# /var/lib/floonet-mixexit/nym_address.txt in your relay pool listing.
+
+[Unit]
+Description=floonet-mixexit (scoped mixnet exit for the co-located relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+DynamicUser=yes
+
+# Where the exit pipes accepted streams: your relay's public TLS host:port.
+Environment=FLOONET_EXIT_UPSTREAM=127.0.0.1:443
+
+# Persistent mixnet identity at /var/lib/floonet-mixexit.
+StateDirectory=floonet-mixexit
+StateDirectoryMode=0750
+Environment=FLOONET_MIXEXIT_DIR=/var/lib/floonet-mixexit
+
+ExecStart=/usr/local/bin/floonet-mixexit
+Restart=on-failure
+RestartSec=5
+
+# --- hardening ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+ReadWritePaths=/var/lib/floonet-mixexit
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

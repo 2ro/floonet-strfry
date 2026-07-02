@@ -1,0 +1,60 @@
+# Hardened systemd unit for the floonet-strfry relay on bare metal.
+#
+# Install (after deploy/strfry/apply-spec.sh has built the binary):
+#   sudo install -m0755 strfry-build/strfry /usr/local/bin/strfry
+#   sudo install -m0755 plugin/floonet_writepolicy.py /usr/local/bin/
+#   sudo install -m0644 -D deploy/strfry/strfry.conf /etc/floonet-strfry/strfry.conf
+#   sudo install -m0640 .env /etc/floonet-strfry.env       # see .env.example
+#   sudo install -m0644 deploy/systemd/floonet-strfry.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now floonet-strfry
+#
+# Point the conf's `db` at the StateDirectory below, e.g.
+#   db = "/var/lib/floonet-strfry/"
+# and its writePolicy plugin at /usr/local/bin/floonet_writepolicy.py.
+
+[Unit]
+Description=floonet-strfry relay (stock strfry + Floonet write policy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+DynamicUser=yes
+
+# Plugin configuration (FLOONET_ALLOWED_KINDS etc). The plugin inherits the
+# relay process environment.
+EnvironmentFile=/etc/floonet-strfry.env
+
+# Managed state at /var/lib/floonet-strfry (created and chowned by systemd).
+StateDirectory=floonet-strfry
+StateDirectoryMode=0750
+
+ExecStart=/usr/local/bin/strfry --config /etc/floonet-strfry/strfry.conf relay
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=524288
+
+# --- hardening ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# Only the LMDB directory is writable.
+ReadWritePaths=/var/lib/floonet-strfry
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

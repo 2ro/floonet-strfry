@@ -1,0 +1,59 @@
+# Caddy reverse proxy for the Floonet relay + name authority, with automatic
+# HTTPS.
+#
+# Used by docker-compose.yml (upstreams are the compose service names
+# `authority` and `relay`). For a bare-metal Caddy install, replace those
+# with `127.0.0.1:8191` and `127.0.0.1:7777`, set the site address to your
+# domain literally, and point the landing root at deploy/landing.
+#
+# FLOONET_DOMAIN is injected from the environment by compose.
+
+{$FLOONET_DOMAIN} {
+	# SECURITY-CRITICAL (both upstreams): X-Real-IP is set from the real
+	# client address inside each reverse_proxy below. The name authority keys
+	# ALL of its per-IP rate limiting off this header; if the proxy does not
+	# set it, every request looks like one client and the limiter is
+	# defeated. Caddy's {remote_host} is the connecting peer, not a
+	# forwardable client header.
+
+	# NIP-05 resolution and the registration/paid API go to the authority.
+	# gzip is scoped here (HTTP/JSON) and deliberately NOT applied to the
+	# relay path: strfry already negotiates permessage-deflate on the
+	# WebSocket.
+	@authority {
+		path /.well-known/nostr.json /.well-known/nostr.json/* /api/*
+	}
+	handle @authority {
+		encode gzip
+		reverse_proxy authority:8191 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# The Floonet logo and a static landing page for plain browser visits.
+	# The relay wire protocol never matches these: WebSocket upgrades and
+	# NIP-11 info requests carry the headers excluded below and fall through
+	# to the relay.
+	handle /floonet-logo.svg {
+		root * /srv/landing
+		file_server
+	}
+	@browser {
+		path /
+		not header Connection *Upgrade*
+		not header Accept *application/nostr+json*
+	}
+	handle @browser {
+		root * /srv/landing
+		rewrite * /index.html
+		file_server
+	}
+
+	# Everything else, in particular WebSocket upgrades and the NIP-11
+	# document, is the relay.
+	handle {
+		reverse_proxy relay:7777 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+}

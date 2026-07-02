@@ -1,0 +1,40 @@
+[package]
+name = "floonet-name-authority"
+version = "0.1.0"
+edition = "2021"
+description = "Floonet name authority (name@domain -> nostr pubkey), with optional paid names and paid write access via GoblinPay"
+license = "Apache-2.0"
+
+[lib]
+name = "floonet_name_authority"
+path = "src/lib.rs"
+
+[[bin]]
+name = "floonet-name-authority"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+nostr = { version = "0.44", default-features = false, features = ["std"] }
+base64 = "0.22"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Blocking HTTP client for the GoblinPay REST calls (wrapped in
+# spawn_blocking); small and rustls-based, no OpenSSL dependency.
+ureq = { version = "2", features = ["json"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[profile.release]
+opt-level = 2
+strip = true

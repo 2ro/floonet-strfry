@@ -1,0 +1,115 @@
+# A full, self-contained Floonet relay with automatic HTTPS.
+#
+#   cp .env.example .env   # edit FLOONET_DOMAIN etc.
+#   docker compose up -d
+#
+# gives you:
+#   - relay      : stock strfry (built from source at a pinned ref) + the
+#                  Floonet write policy plugin (default-deny kind whitelist,
+#                  optional NIP-42 and paid-write gates)
+#   - authority  : the bundled name authority (name@domain -> pubkey, with
+#                  optional paid names / paid write access via GoblinPay)
+#   - caddy      : auto-TLS reverse proxy terminating HTTPS for both
+#   - mixexit    : OPTIONAL scoped mixnet exit (COMPOSE_PROFILES=exit), so
+#                  wallets can reach this relay over the mixnet
+#
+# Set FLOONET_DOMAIN / FLOONET_BASE_URL / FLOONET_RELAYS in `.env` (copy
+# .env.example) BEFORE bringing it up: Caddy obtains a certificate for
+# FLOONET_DOMAIN, so DNS must already point at this host.
+
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: deploy/strfry/Dockerfile
+    image: floonet-strfry:latest
+    restart: unless-stopped
+    environment:
+      # Write policy plugin configuration (the plugin inherits strfry's
+      # environment). See plugin/floonet_writepolicy.py and .env.example.
+      FLOONET_ALLOWED_KINDS: ${FLOONET_ALLOWED_KINDS:-0,3,5,13,1059,10002,10050,27235}
+      FLOONET_REQUIRE_AUTH: ${FLOONET_REQUIRE_AUTH:-false}
+      FLOONET_PAY_MODE: ${FLOONET_PAY_MODE:-off}
+      FLOONET_AUTHORITY_URL: http://authority:8191
+      FLOONET_PAID_CACHE_SECS: ${FLOONET_PAID_CACHE_SECS:-60}
+    volumes:
+      - relay-data:/strfry-db
+      - ./deploy/strfry/strfry.conf:/app/strfry.conf:ro
+    expose:
+      - "7777"
+    # Bound the relay's footprint so an unauthenticated subscription/ingest
+    # flood can't starve the authority or proxy on the same host.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+  authority:
+    build: ./name-authority
+    image: floonet-name-authority:latest
+    restart: unless-stopped
+    environment:
+      # Identity. Override these in .env for your own deployment.
+      FLOONET_DOMAIN: ${FLOONET_DOMAIN:-floonet.example}
+      FLOONET_BASE_URL: ${FLOONET_BASE_URL:-https://floonet.example}
+      FLOONET_RELAYS: ${FLOONET_RELAYS:-wss://floonet.example}
+      # In-container paths (persisted on the named volume).
+      FLOONET_NAMES_BIND: 0.0.0.0:8191
+      FLOONET_NAMES_DB: /data/names.db
+      # Paid mode (all optional; free by default). See .env.example.
+      FLOONET_PAY_MODE: ${FLOONET_PAY_MODE:-off}
+      FLOONET_NAME_PRICE_GRIN: ${FLOONET_NAME_PRICE_GRIN:-0}
+      FLOONET_WRITE_PRICE_GRIN: ${FLOONET_WRITE_PRICE_GRIN:-0}
+      GOBLINPAY_URL: ${GOBLINPAY_URL:-}
+      GOBLINPAY_TOKEN: ${GOBLINPAY_TOKEN:-}
+      GOBLINPAY_WEBHOOK_SECRET: ${GOBLINPAY_WEBHOOK_SECRET:-}
+    volumes:
+      - authority-data:/data
+    expose:
+      - "8191"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - authority
+      - relay
+    environment:
+      FLOONET_DOMAIN: ${FLOONET_DOMAIN:-floonet.example}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/landing:/srv/landing:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  # The optional co-located mixnet exit. Off unless the `exit` profile is
+  # active (set COMPOSE_PROFILES=exit in .env, the package's exit toggle).
+  # It pipes every accepted mixnet stream to this stack's own TLS front, so
+  # wallets reach the relay over the mixnet with end-to-end TLS; the exit
+  # sees only ciphertext and can reach nothing but this relay. Its stable
+  # mixnet address is printed at startup and written to the volume's
+  # nym_address.txt; publish that address (relay pool `exit` field) so
+  # wallets can find it.
+  mixexit:
+    build: ./mixexit
+    image: floonet-mixexit:latest
+    restart: unless-stopped
+    profiles: ["exit"]
+    depends_on:
+      - caddy
+    environment:
+      FLOONET_MIXEXIT_DIR: /data
+      FLOONET_EXIT_UPSTREAM: ${FLOONET_EXIT_UPSTREAM:-caddy:443}
+    volumes:
+      - mixexit-data:/data
+
+volumes:
+  relay-data:
+  authority-data:
+  caddy-data:
+  caddy-config:
+  mixexit-data:
