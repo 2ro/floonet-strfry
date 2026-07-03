@@ -155,6 +155,35 @@ NIP-98 requests are verified fully: signature, kind 27235, `u`/`method`/
 `payload` tags against `FLOONET_BASE_URL`, a freshness window, and one-time
 event ids (replay rejection).
 
+## Co-locating names on the relay domain
+
+`FLOONET_AUTHORITY_COLOCATED` controls whether the authority's NIP-05 lookup
+(`/.well-known/nostr.json`) is served on the **relay's own domain**, so
+`name@relay.example` resolves without the authority needing its own hostname.
+
+- **Docker Compose / Caddy: on by default.** The whole stack lives on one
+  `FLOONET_DOMAIN`; `deploy/Caddyfile` routes `/.well-known/nostr.json` (and
+  `/api/*`) to the authority and everything else to the relay, so
+  `name@FLOONET_DOMAIN` just works. Nothing to configure.
+
+- **Split nginx deploy: opt in.** When the relay and the authority run on
+  separate subdomains (the `deploy/us-east/` pattern — relay on
+  `relay.example`, the authority's own vhost on `nm.example`), enable it by
+  including the shipped snippet in the relay vhost's `:443` server block,
+  ahead of the WebSocket catch-all:
+
+  ```nginx
+  # inside  server { listen ...:443 ssl ...; server_name relay.example; }
+  # BEFORE  location / { ...websocket... }
+  include /etc/nginx/snippets/floonet-colocated-authority.conf;   # deploy/us-east/colocated-authority.conf
+  ```
+
+  Then `nginx -t && nginx -s reload`, and
+  `https://relay.example/.well-known/nostr.json?name=<n>` returns the
+  authority's JSON. Only the exact-match read path is co-located; registration
+  and the rest of `/api/*` stay on the authority's own domain. The snippet sets
+  `X-Real-IP` (load-bearing — the authority's per-IP rate limiter keys off it).
+
 ## Mixnet exit (optional)
 
 Uncomment `COMPOSE_PROFILES=exit` in `.env` and the package also runs

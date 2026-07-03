@@ -17,9 +17,12 @@
 	# forwardable client header.
 
 	# NIP-05 resolution and the registration/paid API go to the authority.
-	# gzip is scoped here (HTTP/JSON) and deliberately NOT applied to the
-	# relay path: strfry already negotiates permessage-deflate on the
-	# WebSocket.
+	# This single-domain stack is co-located by design: names AND the relay
+	# answer on FLOONET_DOMAIN (the FLOONET_AUTHORITY_COLOCATED=on default;
+	# a split nginx deploy opts in via deploy/us-east/colocated-authority.conf
+	# instead — see the README). gzip is scoped here (HTTP/JSON) and
+	# deliberately NOT applied to the relay path: strfry already negotiates
+	# permessage-deflate on the WebSocket.
 	@authority {
 		path /.well-known/nostr.json /.well-known/nostr.json/* /api/*
 	}
