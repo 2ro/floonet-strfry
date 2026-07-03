@@ -12,7 +12,7 @@ through strfry's own extension points:
 | Piece | What it is |
 | --- | --- |
 | `plugin/floonet_writepolicy.py` | The write policy plugin: default-deny kind whitelist, optional NIP-42 gate, optional paid-write gate |
-| `name-authority/` | The bundled name authority (Rust/axum/SQLite): NIP-05 resolution, NIP-98 self-service registration, optional GoblinPay paywall |
+| `name-authority/` | The bundled name authority (Rust/axum/SQLite): NIP-05 resolution, NIP-98 self-service registration, optional GoblinPay paywall — co-located on the relay's own domain by default |
 | `mixexit/` | An optional, scoped mixnet exit so wallets can reach this relay over the mixnet |
 | `deploy/` | strfry conf + Dockerfile + apply-spec.sh, Caddy TLS proxy, landing page, hardened systemd units |
 
