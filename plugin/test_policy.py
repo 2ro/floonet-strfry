@@ -23,7 +23,10 @@ import floonet_writepolicy as wp
 
 PLUGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "floonet_writepolicy.py")
 PK = "a" * 64
-DEFAULT_KINDS = (0, 3, 5, 13, 1059, 10002, 10050, 27235)
+DEFAULT_KINDS = (
+    0, 1, 3, 5, 7, 13, 14, 16, 17, 1059, 1111, 10000, 10002, 10050, 24133,
+    27235, 30000, 30003, 30078, 30402, 30405, 30406, 31990,
+)
 
 
 def req(kind, authed=None, event_id="e1"):
@@ -54,10 +57,22 @@ class KindWhitelist(unittest.TestCase):
             self.assertEqual(reply["id"], "e1")
 
     def test_disallowed_kinds_rejected(self):
-        for kind in (1, 4, 6, 7, 14, 1058, 1060, 30023, 22242, -1):
+        # 25910 (ContextVM) rides inside 1059 gift wraps only;
+        # 30017/30018 (legacy NIP-15) come from sellers' own relays;
+        # 9735 (zap) is dead in the GRIN-only fork. All stay rejected.
+        for kind in (4, 6, 9735, 1058, 1060, 25910, 30017, 30018, 30023, 22242, -1):
             reply = wp.decide(req(kind), cfg())
             self.assertEqual(reply["action"], "reject", "kind %d" % kind)
             self.assertIn("kind not accepted", reply["msg"])
+
+    def test_marketplace_kind_accepted_and_zap_rejected(self):
+        # A newly-allowed Magick Market kind (NIP-89 handler info) is accepted.
+        self.assertEqual(wp.decide(req(31990), cfg())["action"], "accept")
+        # A still-rejected kind (Lightning zap receipt, disabled in the
+        # GRIN-only marketplace) is refused by the default-deny whitelist.
+        reply = wp.decide(req(9735), cfg())
+        self.assertEqual(reply["action"], "reject")
+        self.assertIn("kind not accepted", reply["msg"])
 
     def test_malformed_kind_fails_closed(self):
         for bad in (None, "1059", 3.5, True, [1059]):
@@ -174,7 +189,7 @@ class PaidWriteGate(unittest.TestCase):
 
     def test_kind_check_still_first_in_write_mode(self):
         _Authority.paid_pubkeys = {PK}
-        reply = wp.decide(req(1, authed=PK), self.c())
+        reply = wp.decide(req(9735, authed=PK), self.c())
         self.assertEqual(reply["action"], "reject")
         self.assertIn("kind not accepted", reply["msg"])
 
@@ -199,7 +214,7 @@ class StrfryPipeProtocol(unittest.TestCase):
         return [json.loads(out) for out in proc.stdout.splitlines()]
 
     def test_accept_and_reject_over_the_wire(self):
-        replies = self.run_plugin([req(1059, event_id="ok1"), req(1, event_id="no1"), req(0, event_id="ok2")])
+        replies = self.run_plugin([req(1059, event_id="ok1"), req(9735, event_id="no1"), req(0, event_id="ok2")])
         self.assertEqual(
             [(r["id"], r["action"]) for r in replies],
             [("ok1", "accept"), ("no1", "reject"), ("ok2", "reject" if 0 not in DEFAULT_KINDS else "accept")],

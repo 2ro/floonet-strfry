@@ -27,11 +27,46 @@ their events with a `-` tag: first attempt triggers the challenge, the
 client AUTHs, then republishes. Verified end to end against strfry
 b80cda3a812af1b662223edad47eb70b053508b6.
 
+This relay serves two apps, so the whitelist is the union of their kinds
+(default-deny for everything else). Goblin wallet kinds:
+
+    0      profile metadata (NIP-01)
+    3      contact list (NIP-02)
+    5      event deletion (NIP-09)
+    13     seal: inner sealed event of a gift wrap (NIP-59)
+    1059   gift wrap: sealed DMs and payments (NIP-59)
+    10002  relay list metadata (NIP-65)
+    10050  DM relay list (NIP-17)
+    27235  HTTP auth event for the name authority (NIP-98)
+
+Magick Market marketplace kinds (also reuses 0/5/1059/10002 above):
+
+    1      text note: bug reports, shared listings (NIP-01)
+    7      reaction (NIP-25)
+    14     order chat / general order message, plaintext (Gamma spec)
+    16     order processing and status update (Gamma spec)
+    17     payment receipt / confirmation (Gamma spec)
+    1111   comment (NIP-22)
+    10000  mute list, used as merchant/product blacklist (NIP-51)
+    30000  people set: admins, editors, featured users, vanity, NIP-05 (NIP-51)
+    30003  bookmark set: featured collections (NIP-51)
+    30078  app-specific data: cart, relay prefs, V4V (NIP-78)
+    30402  product listing (NIP-99)
+    30405  product collection / featured products (Gamma spec)
+    30406  shipping option (Gamma spec)
+    31990  handler information (NIP-89)
+    24133  NIP-46 remote signing (Nostr Connect, ephemeral — Goblin wallet login)
+
+Excluded on purpose: 25910 (ContextVM) only ever rides inside a 1059 gift
+wrap, never raw; 30017/30018 (legacy NIP-15) are read from sellers' own relays
+during migration, never written here; 9735 (Lightning zap receipt) is dead in
+this GRIN-only fork.
+
 Configuration is environment variables (set them on the strfry process; the
 plugin inherits them, e.g. via docker compose or the systemd unit):
 
-    FLOONET_ALLOWED_KINDS   comma-separated kind whitelist
-                            [default: 0,3,5,13,1059,10002,10050,27235]
+    FLOONET_ALLOWED_KINDS   comma-separated kind whitelist [default: the
+                            Goblin + Magick Market set documented above]
     FLOONET_REQUIRE_AUTH    true/false      [default: false]
     FLOONET_PAY_MODE        off|name|write  [default: off]
                             (only "write" changes plugin behavior; "name" is
@@ -53,7 +88,10 @@ import sys
 import time
 import urllib.request
 
-DEFAULT_ALLOWED_KINDS = "0,3,5,13,1059,10002,10050,27235"
+DEFAULT_ALLOWED_KINDS = (
+    "0,1,3,5,7,13,14,16,17,1059,1111,10000,10002,10050,24133,27235,"
+    "30000,30003,30078,30402,30405,30406,31990"
+)
 
 
 def load_config(env=os.environ):
