@@ -13,7 +13,7 @@ through strfry's own extension points:
 | --- | --- |
 | `plugin/floonet_writepolicy.py` | The write policy plugin: default-deny kind whitelist, optional NIP-42 gate, optional paid-write gate |
 | `name-authority/` | The bundled name authority (Rust/axum/SQLite): NIP-05 resolution, NIP-98 self-service registration, optional GoblinPay paywall — co-located on the relay's own domain by default |
-| `mixexit/` | An optional, scoped mixnet exit so wallets can reach this relay over the mixnet |
+| `deploy/tor/` | An optional Tor onion service so wallets can reach this relay over Tor without a Tor exit hop |
 | `deploy/` | strfry conf + Dockerfile + apply-spec.sh, Caddy TLS proxy, landing page, hardened systemd units |
 
 ## Deploy
@@ -23,7 +23,7 @@ Pick your comfort level. All three paths produce the same relay.
 ### 1. Docker Compose (recommended)
 
 One command brings up the whole unit: relay + name authority + auto-TLS
-proxy (and, if enabled, the mixnet exit).
+proxy (and, if enabled, a Tor onion).
 
 ```sh
 cp .env.example .env    # set FLOONET_DOMAIN, FLOONET_BASE_URL, FLOONET_RELAYS
@@ -44,17 +44,18 @@ cd name-authority && cargo build --release
 ```
 
 Then install the hardened units from `deploy/systemd/` (each unit's header
-has the exact install commands): `floonet-strfry.service`,
-`floonet-authority.service` and, optionally, `floonet-mixexit.service`.
-Put Caddy or nginx in front (see `deploy/Caddyfile`); the proxy MUST set
-`X-Real-IP`, the authority's rate limiting keys off it.
+has the exact install commands): `floonet-strfry.service` and
+`floonet-authority.service`. Put Caddy or nginx in front (see
+`deploy/Caddyfile`); the proxy MUST set `X-Real-IP`, the authority's rate
+limiting keys off it. To also front the relay with a Tor onion, run a system
+tor with the snippet in `deploy/tor/torrc` (see "Tor onion" below).
 
 ### 3. From source (developers)
 
 `deploy/strfry/Dockerfile` and `apply-spec.sh` document the strfry build
-exactly; the authority and the exit are plain `cargo build` crates; the
-plugin is a single Python file with no dependencies. `plugin/test_policy.py`
-and `cargo test` in `name-authority/` run the test suites.
+exactly; the authority is a plain `cargo build` crate; the plugin is a single
+Python file with no dependencies. `plugin/test_policy.py` and `cargo test` in
+`name-authority/` run the test suites.
 
 ## The kind whitelist (the keystone)
 
@@ -184,24 +185,29 @@ event ids (replay rejection).
   and the rest of `/api/*` stay on the authority's own domain. The snippet sets
   `X-Real-IP` (load-bearing — the authority's per-IP rate limiter keys off it).
 
-## Mixnet exit (optional)
+## Tor onion (optional)
 
-Uncomment `COMPOSE_PROFILES=exit` in `.env` and the package also runs
-`floonet-mixexit`: a small, unbonded mixnet client that accepts incoming
-mixnet streams and pipes every one of them to this stack's own TLS front.
-Wallets that prefer not to touch DNS or reveal their relay choice can then
-reach this relay entirely over the mixnet, with end-to-end TLS; the exit
-sees only ciphertext.
+Goblin wallets connect to relays over Tor: the client opens a Tor circuit and
+reaches the relay's ordinary clearnet endpoint (`FLOONET_DOMAIN`) through a
+Tor exit, so the relay never sees the user's real IP. That works against any
+Floonet relay with no extra setup here, and it is the whole transport story:
+Tor hides the user's network location; the kind whitelist and gift-wrapped
+(kind 1059) payloads hide everything else from the relay itself. The relay
+needs no privacy component of its own.
 
-It is deliberately **scoped**: per-stream targets are never honored, the one
-upstream is fixed by config, so it is structurally not an open proxy and
-carries no open-proxy liability. No bonding, no tokens, no directory
-listing.
+An operator who wants to remove the Tor-exit hop entirely can front the relay
+with a **Tor onion service**. Uncomment `COMPOSE_PROFILES=tor` in `.env` and
+the package also runs the `tor` service: a stock system tor daemon whose
+hidden service forwards straight to strfry's websocket listener (no TLS on
+that hop, since the onion transport is already encrypted and authenticated end
+to end). Wallets then reach the relay over an `.onion` with no exit hop at all.
 
-On first start it prints its **stable mixnet address** (also written to the
-data volume's `nym_address.txt`). Publish that address in your relay pool
-listing (the `exit` field) so wallets can find it, and back the data
-directory up: losing it rotates the address.
+tor prints the `.onion` address to its logs on first start and stores its key
+on the `tor-data` volume; back that volume up, since losing it rotates the
+address. Publish the `.onion` so wallets can find it. Without Docker, run a
+system tor with the snippet in `deploy/tor/torrc` (a `HiddenServiceDir` plus a
+`HiddenServicePort` pointed at the relay's local websocket port) alongside the
+`floonet-strfry.service` unit.
 
 ## Extending the policy (plugins, paid resources)
 
@@ -258,7 +264,7 @@ essentials:
 | `FLOONET_WRITE_PRICE_GRIN` | `0` | price of write access, in GRIN |
 | `GOBLINPAY_URL` / `GOBLINPAY_TOKEN` | unset | your GoblinPay server |
 | `GOBLINPAY_WEBHOOK_SECRET` | unset | enables the webhook receiver |
-| `COMPOSE_PROFILES` | unset | `exit` also runs the mixnet exit |
+| `COMPOSE_PROFILES` | unset | `tor` also runs a Tor onion in front of the relay |
 
 ## Note for Goblin wallet users
 

@@ -1,0 +1,16 @@
+# Tor onion service in front of the Floonet relay (docker-compose `tor`
+# profile). The hidden service forwards straight to strfry's websocket
+# listener over the compose network; no TLS is needed on that hop because
+# the onion transport is already encrypted and authenticated end to end.
+#
+# The .onion address is derived from the key tor writes under
+# HiddenServiceDir. It is printed to the tor logs on first start and lives on
+# the tor-data volume; back that volume up, since losing it rotates the
+# address. Publish the .onion so wallets can reach this relay over Tor.
+
+User tor
+DataDirectory /var/lib/tor
+
+HiddenServiceDir /var/lib/tor/floonet-relay
+# onion virtual port 80 (ws default) -> the relay container's ws listener
+HiddenServicePort 80 relay:7777
