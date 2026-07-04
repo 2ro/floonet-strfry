@@ -25,15 +25,18 @@ PLUGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "floonet_write
 PK = "a" * 64
 DEFAULT_KINDS = (
     0, 1, 3, 5, 7, 13, 14, 16, 17, 1059, 1111, 10000, 10002, 10050, 24133,
-    27235, 30000, 30003, 30078, 30402, 30405, 30406, 31990,
+    27235, 30000, 30003, 30023, 30078, 30402, 30405, 30406, 31990,
 )
+# npub for PK (the 32-byte key 0xaa..aa); another key for "unauthorized".
+PK_NPUB = "npub1424242424242424242424242424242424242424242424242424qamrcaj"
+OTHER_PK = "b" * 64
 
 
-def req(kind, authed=None, event_id="e1"):
+def req(kind, authed=None, event_id="e1", pubkey=PK):
     """A request shaped exactly like strfry's plugin input."""
     r = {
         "type": "new",
-        "event": {"id": event_id, "pubkey": PK, "kind": kind, "tags": [], "content": ""},
+        "event": {"id": event_id, "pubkey": pubkey, "kind": kind, "tags": [], "content": ""},
         "receivedAt": 1700000000,
         "sourceType": "IP4",
         "sourceInfo": "203.0.113.7",
@@ -51,8 +54,11 @@ def cfg(**over):
 
 class KindWhitelist(unittest.TestCase):
     def test_default_allowed_kinds_accepted(self):
+        # Authorize PK so the locked public-note kinds (1, 30023) also pass;
+        # this test only exercises the kind whitelist.
+        c = cfg(authorized_authors={PK})
         for kind in DEFAULT_KINDS:
-            reply = wp.decide(req(kind), cfg())
+            reply = wp.decide(req(kind), c)
             self.assertEqual(reply["action"], "accept", "kind %d" % kind)
             self.assertEqual(reply["id"], "e1")
 
@@ -60,7 +66,8 @@ class KindWhitelist(unittest.TestCase):
         # 25910 (ContextVM) rides inside 1059 gift wraps only;
         # 30017/30018 (legacy NIP-15) come from sellers' own relays;
         # 9735 (zap) is dead in the GRIN-only fork. All stay rejected.
-        for kind in (4, 6, 9735, 1058, 1060, 25910, 30017, 30018, 30023, 22242, -1):
+        # (30023 is now whitelisted but author-locked; see PublicNoteLock.)
+        for kind in (4, 6, 9735, 1058, 1060, 25910, 30017, 30018, 22242, -1):
             reply = wp.decide(req(kind), cfg())
             self.assertEqual(reply["action"], "reject", "kind %d" % kind)
             self.assertIn("kind not accepted", reply["msg"])
@@ -85,7 +92,10 @@ class KindWhitelist(unittest.TestCase):
         self.assertEqual(wp.decide({"event": "nope"}, cfg())["action"], "reject")
 
     def test_custom_kind_list_env(self):
-        c = wp.load_config(env={"FLOONET_ALLOWED_KINDS": "1,7"})
+        # Kind 1 is author-locked, so authorize PK to see the whitelist pass.
+        c = wp.load_config(
+            env={"FLOONET_ALLOWED_KINDS": "1,7", "FLOONET_AUTHORIZED_AUTHORS": PK}
+        )
         self.assertEqual(wp.decide(req(1), c)["action"], "accept")
         self.assertEqual(wp.decide(req(0), c)["action"], "reject")
 
@@ -194,6 +204,113 @@ class PaidWriteGate(unittest.TestCase):
         self.assertIn("kind not accepted", reply["msg"])
 
 
+class PublicNoteLock(unittest.TestCase):
+    """The public-note lockdown: kinds 1 and 30023 are accepted only from
+    operator-authorized authors; everything else is unaffected."""
+
+    def test_locked_kind_from_unauthorized_key_rejected(self):
+        c = cfg(authorized_authors={PK})
+        for kind in (1, 30023):
+            reply = wp.decide(req(kind, pubkey=OTHER_PK), c)
+            self.assertEqual(reply["action"], "reject", "kind %d" % kind)
+            self.assertIn("authorized authors", reply["msg"])
+
+    def test_locked_kind_from_authorized_hex_key_accepted(self):
+        c = wp.load_config(env={"FLOONET_AUTHORIZED_AUTHORS": PK})
+        for kind in (1, 30023):
+            self.assertEqual(wp.decide(req(kind), c)["action"], "accept", "kind %d" % kind)
+
+    def test_locked_kind_from_authorized_npub_accepted(self):
+        # Same key, configured as an npub instead of hex.
+        c = wp.load_config(env={"FLOONET_AUTHORIZED_AUTHORS": PK_NPUB})
+        self.assertEqual(c["authorized_authors"], {PK})
+        for kind in (1, 30023):
+            self.assertEqual(wp.decide(req(kind), c)["action"], "accept", "kind %d" % kind)
+
+    def test_non_locked_kinds_unaffected_by_random_keys(self):
+        # No authors configured; profiles, gift wraps and marketplace listings
+        # from arbitrary keys are still accepted (kind 0 must stay open).
+        c = cfg()
+        self.assertEqual(c["authorized_authors"], set())
+        for kind in (0, 1059, 30402):
+            self.assertEqual(
+                wp.decide(req(kind, pubkey=OTHER_PK), c)["action"], "accept", "kind %d" % kind
+            )
+
+    def test_closed_by_default_when_no_authors(self):
+        c = cfg()
+        for kind in (1, 30023):
+            reply = wp.decide(req(kind), c)
+            self.assertEqual(reply["action"], "reject", "kind %d" % kind)
+            self.assertIn("authorized authors", reply["msg"])
+
+    def test_malformed_npub_skipped_without_crash(self):
+        # A garbage npub, a too-short hex, and a good hex in one list: the
+        # good one survives, the bad ones are dropped, the plugin lives.
+        c = wp.load_config(
+            env={"FLOONET_AUTHORIZED_AUTHORS": "npub1notvalid,dead,%s" % PK}
+        )
+        self.assertEqual(c["authorized_authors"], {PK})
+        self.assertEqual(wp.decide(req(1), c)["action"], "accept")
+
+    def test_mixed_hex_and_npub_and_whitespace(self):
+        c = wp.load_config(
+            env={"FLOONET_AUTHORIZED_AUTHORS": " %s , %s " % (PK_NPUB, OTHER_PK)}
+        )
+        self.assertEqual(c["authorized_authors"], {PK, OTHER_PK})
+
+
+class EnvFileConfig(unittest.TestCase):
+    """load_config also reads a KEY=VALUE file, with real env taking priority."""
+
+    def _write(self, body):
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix="floonet-env-")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(body)
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_env_file_supplies_config(self):
+        path = self._write(
+            "# floonet config\n"
+            "FLOONET_ALLOWED_KINDS = 1,7\n"
+            "\n"
+            "FLOONET_AUTHORIZED_AUTHORS=%s\n" % PK
+        )
+        c = wp.load_config(env={"FLOONET_ENV_FILE": path})
+        self.assertEqual(c["allowed_kinds"], frozenset({1, 7}))
+        self.assertEqual(c["authorized_authors"], {PK})
+        self.assertEqual(wp.decide(req(1), c)["action"], "accept")
+        self.assertEqual(wp.decide(req(0), c)["action"], "reject")
+
+    def test_real_env_overrides_file(self):
+        path = self._write("FLOONET_ALLOWED_KINDS=1\n")
+        c = wp.load_config(
+            env={"FLOONET_ENV_FILE": path, "FLOONET_ALLOWED_KINDS": "7"}
+        )
+        self.assertEqual(c["allowed_kinds"], frozenset({7}))
+
+    def test_missing_file_is_harmless(self):
+        c = wp.load_config(env={"FLOONET_ENV_FILE": "/no/such/floonet.env"})
+        self.assertIn(1059, c["allowed_kinds"])
+
+
+class Bech32Decoder(unittest.TestCase):
+    def test_known_npub_decodes(self):
+        self.assertEqual(wp._npub_to_hex(PK_NPUB), PK)
+
+    def test_invalid_npubs_return_none(self):
+        for bad in (
+            "npub1notvalid",
+            "npub1424242424242424242424242424242424242424242424242424qamrcaX",  # bad checksum
+            "nsec1qqqqq",  # wrong hrp
+            "",
+            "424242",
+        ):
+            self.assertIsNone(wp._npub_to_hex(bad), bad)
+
+
 class StrfryPipeProtocol(unittest.TestCase):
     """Run the plugin as strfry does: one JSONL request per line on stdin,
     one JSONL reply per line on stdout, in order."""
@@ -236,7 +353,8 @@ class StrfryPipeProtocol(unittest.TestCase):
 
     def test_env_whitelist_respected_over_the_wire(self):
         replies = self.run_plugin(
-            [req(1, event_id="now-ok")], env={"FLOONET_ALLOWED_KINDS": "1"}
+            [req(1, event_id="now-ok")],
+            env={"FLOONET_ALLOWED_KINDS": "1", "FLOONET_AUTHORIZED_AUTHORS": PK},
         )
         self.assertEqual((replies[0]["id"], replies[0]["action"]), ("now-ok", "accept"))
 

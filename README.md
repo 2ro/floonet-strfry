@@ -78,6 +78,40 @@ set is exactly what the Goblin wallet uses:
 To accept another kind, edit `FLOONET_ALLOWED_KINDS` in `.env` and restart
 the relay. Nothing else changes.
 
+## Public notes are author-locked
+
+Public-note kinds (`1` text notes, `30023` long-form articles) are accepted
+**only** from an operator-chosen list of authors. This is closed by default:
+with no authors configured, kinds `1` and `30023` are rejected for everyone,
+so random notes cannot be spammed to your relay. Everything else (profiles,
+gift wraps, marketplace listings, lists, ephemeral events) is unaffected, and
+kind `0` profiles stay open so wallets can republish them.
+
+You decide who can post. List the authors in `FLOONET_AUTHORIZED_AUTHORS`,
+comma-separated, each entry a hex pubkey or an npub (your choice):
+
+```sh
+FLOONET_AUTHORIZED_AUTHORS=npub1abc...,fd3a...hex...,npub1def...
+```
+
+Invalid entries are logged to stderr and skipped; the rest still apply.
+
+### Changing authors without recreating the container
+
+Where the container's environment cannot be changed without recreating it,
+drop a plain `KEY=VALUE` file named `floonet.env` next to the plugin script
+(override the path with `FLOONET_ENV_FILE`) and set the same keys there:
+
+```sh
+# /usr/local/bin/floonet.env
+FLOONET_AUTHORIZED_AUTHORS=npub1abc...,npub1def...
+```
+
+Real environment variables take precedence over the file. strfry reloads the
+plugin whenever the script's modification time changes, so after editing
+`floonet.env` just `touch` the plugin script and the next write picks up the
+new list. No relay or container restart is needed.
+
 ## Authentication (NIP-42), optional
 
 Set `FLOONET_REQUIRE_AUTH=true` in `.env` and flip `relay.auth.enabled` to
@@ -258,6 +292,8 @@ essentials:
 | `FLOONET_BASE_URL` | `https://floonet.example` | public base URL (NIP-98 verification) |
 | `FLOONET_RELAYS` | `wss://floonet.example` | relays advertised in nostr.json |
 | `FLOONET_ALLOWED_KINDS` | `0,3,5,13,1059,10002,10050,27235` | the whitelist |
+| `FLOONET_AUTHORIZED_AUTHORS` | unset (closed) | authors (hex or npub) allowed to post kinds `1`/`30023` |
+| `FLOONET_ENV_FILE` | `floonet.env` next to the plugin | optional `KEY=VALUE` config file (env vars win) |
 | `FLOONET_REQUIRE_AUTH` | `false` | NIP-42 gate |
 | `FLOONET_PAY_MODE` | `off` | `off` / `name` / `write` |
 | `FLOONET_NAME_PRICE_GRIN` | `0` | price of a name, in GRIN |
