@@ -11,6 +11,10 @@ malformed input, unexpected error, or unreachable dependency rejects the
 event rather than letting it through.
 
     1. kind whitelist   default-deny; only FLOONET_ALLOWED_KINDS pass
+    1b. public-note lock kinds 1 and 30023 (text notes, long-form articles)
+                        are accepted only from FLOONET_AUTHORIZED_AUTHORS;
+                        closed by default (no authors = these kinds rejected
+                        for everyone). Every other kind is unaffected.
     2. auth requirement optional; with FLOONET_REQUIRE_AUTH=true an event is
                         rejected unless the connection completed NIP-42 AUTH
                         (also enable relay.auth in strfry.conf)
@@ -41,7 +45,7 @@ This relay serves two apps, so the whitelist is the union of their kinds
 
 Magick Market marketplace kinds (also reuses 0/5/1059/10002 above):
 
-    1      text note: bug reports, shared listings (NIP-01)
+    1      text note: bug reports, shared listings (NIP-01) [author-locked]
     7      reaction (NIP-25)
     14     order chat / general order message, plaintext (Gamma spec)
     16     order processing and status update (Gamma spec)
@@ -50,6 +54,7 @@ Magick Market marketplace kinds (also reuses 0/5/1059/10002 above):
     10000  mute list, used as merchant/product blacklist (NIP-51)
     30000  people set: admins, editors, featured users, vanity, NIP-05 (NIP-51)
     30003  bookmark set: featured collections (NIP-51)
+    30023  long-form article: news / posts (NIP-23) [author-locked]
     30078  app-specific data: cart, relay prefs, V4V (NIP-78)
     30402  product listing (NIP-99)
     30405  product collection / featured products (Gamma spec)
@@ -67,6 +72,11 @@ plugin inherits them, e.g. via docker compose or the systemd unit):
 
     FLOONET_ALLOWED_KINDS   comma-separated kind whitelist [default: the
                             Goblin + Magick Market set documented above]
+    FLOONET_AUTHORIZED_AUTHORS
+                            comma-separated author pubkeys (hex or npub)
+                            allowed to publish the locked public-note kinds
+                            (1, 30023) [default: empty = closed]. Invalid
+                            entries are logged to stderr and skipped.
     FLOONET_REQUIRE_AUTH    true/false      [default: false]
     FLOONET_PAY_MODE        off|name|write  [default: off]
                             (only "write" changes plugin behavior; "name" is
@@ -74,6 +84,13 @@ plugin inherits them, e.g. via docker compose or the systemd unit):
     FLOONET_AUTHORITY_URL   base URL of the bundled name authority
                             [default: http://authority:8191]
     FLOONET_PAID_CACHE_SECS TTL for cached paid-status lookups [default: 60]
+
+Configuration can also live in a plain KEY=VALUE file next to this script
+(floonet.env, path overridable via FLOONET_ENV_FILE) for deployments where
+the process environment cannot be changed without recreating the container.
+Real environment variables take precedence over the file. strfry reloads the
+plugin whenever this script's mtime changes, so `touch`ing the script after
+editing floonet.env applies new config with no relay/container restart.
 
 To add a kind: edit FLOONET_ALLOWED_KINDS and restart (or touch the plugin
 file; strfry reloads it on mtime change). To add a policy: write a function
@@ -90,13 +107,110 @@ import urllib.request
 
 DEFAULT_ALLOWED_KINDS = (
     "0,1,3,5,7,13,14,16,17,1059,1111,10000,10002,10050,24133,27235,"
-    "30000,30003,30078,30402,30405,30406,31990"
+    "30000,30003,30023,30078,30402,30405,30406,31990"
 )
+
+# Public-note kinds that are accepted only from authorized authors. Closed by
+# default: with no authors configured these kinds are rejected for everyone.
+LOCKED_KINDS = frozenset({1, 30023})
+
+# Default path for the optional KEY=VALUE config file, sitting next to this
+# script. Used when a deployment cannot change the process environment.
+_DEFAULT_ENV_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "floonet.env"
+)
+
+_BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+
+def _bech32_polymod(values):
+    generator = [0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3]
+    chk = 1
+    for value in values:
+        top = chk >> 25
+        chk = ((chk & 0x1FFFFFF) << 5) ^ value
+        for i in range(5):
+            chk ^= generator[i] if ((top >> i) & 1) else 0
+    return chk
+
+
+def _npub_to_hex(s):
+    """Decode a bech32 npub to 64-char lowercase hex, or None if it is not a
+    structurally valid, checksum-correct 32-byte npub. Pure Python, no deps."""
+    if s != s.lower() and s != s.upper():
+        return None  # bech32 forbids mixed case
+    s = s.lower()
+    pos = s.rfind("1")
+    if pos < 1 or pos + 7 > len(s):
+        return None
+    hrp, data_part = s[:pos], s[pos + 1:]
+    if hrp != "npub":
+        return None
+    try:
+        data = [_BECH32_CHARSET.index(c) for c in data_part]
+    except ValueError:
+        return None
+    expanded = [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
+    if _bech32_polymod(expanded + data) != 1:
+        return None
+    acc = bits = 0
+    out = bytearray()
+    for value in data[:-6]:  # drop the 6-symbol checksum
+        acc = (acc << 5) | value
+        bits += 5
+        if bits >= 8:
+            bits -= 8
+            out.append((acc >> bits) & 0xFF)
+    if bits >= 5 or (acc & ((1 << bits) - 1)):
+        return None  # leftover padding bits must be zero
+    if len(out) != 32:
+        return None
+    return out.hex()
+
+
+def _normalize_pubkey(s):
+    """Accept a 64-char hex pubkey or an npub; return canonical lowercase hex
+    or None if the entry is neither."""
+    s = s.strip()
+    if len(s) == 64:
+        try:
+            int(s, 16)
+        except ValueError:
+            return None
+        return s.lower()
+    if s.lower().startswith("npub1"):
+        return _npub_to_hex(s)
+    return None
+
+
+def _read_env_file(path):
+    """Parse a plain KEY=VALUE file: split on the first '=', strip both sides,
+    ignore blank and #-comment lines. A missing/unreadable file yields {}."""
+    values = {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return values
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        values[key.strip()] = val.strip()
+    return values
 
 
 def load_config(env=os.environ):
-    """Parse plugin configuration from environment variables. Malformed
-    values fail fast at startup (never silently widen the policy)."""
+    """Parse plugin configuration. Values come from the process environment,
+    optionally backed by a KEY=VALUE file next to this script (real
+    environment variables take precedence). Malformed kind/pay values fail
+    fast at startup (never silently widen the policy); malformed authorized
+    authors are skipped with a stderr log rather than taking the plugin down.
+    """
+    merged = _read_env_file(env.get("FLOONET_ENV_FILE", _DEFAULT_ENV_FILE))
+    merged.update(env)  # real environment variables win over the file
+    env = merged
     kinds_raw = env.get("FLOONET_ALLOWED_KINDS", DEFAULT_ALLOWED_KINDS)
     try:
         allowed = frozenset(int(k) for k in kinds_raw.split(",") if k.strip())
@@ -113,8 +227,23 @@ def load_config(env=os.environ):
             "floonet-writepolicy: FLOONET_PAY_MODE must be off, name or "
             "write, got %r" % pay_mode
         )
+    authorized_authors = set()
+    for entry in env.get("FLOONET_AUTHORIZED_AUTHORS", "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        hex_pubkey = _normalize_pubkey(entry)
+        if hex_pubkey is None:
+            sys.stderr.write(
+                "floonet-writepolicy: ignoring invalid authorized author %r\n"
+                % entry
+            )
+            sys.stderr.flush()
+            continue
+        authorized_authors.add(hex_pubkey)
     return {
         "allowed_kinds": allowed,
+        "authorized_authors": authorized_authors,
         "require_auth": env.get("FLOONET_REQUIRE_AUTH", "false").strip().lower()
         in ("1", "true", "yes", "on"),
         "pay_mode": pay_mode,
@@ -137,6 +266,21 @@ def check_kind(req, cfg):
         return "blocked: malformed event kind"
     if kind not in cfg["allowed_kinds"]:
         return "blocked: event kind not accepted by this relay"
+    return None
+
+
+def check_authorized_authors(req, cfg):
+    """Public-note lockdown: the locked kinds (1 text note, 30023 long-form
+    article) are accepted only from an operator-authorized author pubkey.
+    Closed by default: with no authors configured these kinds are rejected
+    for everyone. Every other kind (0 profiles, 1059 gift wraps, marketplace
+    kinds, lists, ephemeral) is completely unaffected."""
+    kind = req.get("event", {}).get("kind")
+    if kind not in LOCKED_KINDS:
+        return None
+    pubkey = req.get("event", {}).get("pubkey")
+    if not isinstance(pubkey, str) or pubkey.lower() not in cfg["authorized_authors"]:
+        return "blocked: this relay accepts public notes only from authorized authors"
     return None
 
 
@@ -195,7 +339,7 @@ def check_paid(req, cfg, now=time.monotonic):
     return None
 
 
-CHECKS = [check_kind, check_auth, check_paid]
+CHECKS = [check_kind, check_authorized_authors, check_auth, check_paid]
 
 
 def decide(req, cfg):
@@ -225,8 +369,14 @@ def decide(req, cfg):
 def main():
     cfg = load_config()
     sys.stderr.write(
-        "floonet-writepolicy: allowed kinds %s, require_auth=%s, pay_mode=%s\n"
-        % (sorted(cfg["allowed_kinds"]), cfg["require_auth"], cfg["pay_mode"])
+        "floonet-writepolicy: allowed kinds %s, authorized_authors=%d, "
+        "require_auth=%s, pay_mode=%s\n"
+        % (
+            sorted(cfg["allowed_kinds"]),
+            len(cfg["authorized_authors"]),
+            cfg["require_auth"],
+            cfg["pay_mode"],
+        )
     )
     sys.stderr.flush()
     # Use readline() in a loop rather than iterating stdin: the protocol is

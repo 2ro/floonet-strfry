@@ -12,7 +12,7 @@ through strfry's own extension points:
 | Piece | What it is |
 | --- | --- |
 | `plugin/floonet_writepolicy.py` | The write policy plugin: default-deny kind whitelist, optional NIP-42 gate, optional paid-write gate |
-| `name-authority/` | The bundled name authority (Rust/axum/SQLite): NIP-05 resolution, NIP-98 self-service registration, optional GoblinPay paywall — co-located on the relay's own domain by default |
+| `name-authority/` | The bundled name authority (Rust/axum/SQLite): NIP-05 resolution, NIP-98 self-service registration, optional GoblinPay paywall - co-located on the relay's own domain by default |
 | `deploy/tor/` | An optional Tor onion service so wallets can reach this relay over Tor without a Tor exit hop |
 | `deploy/` | strfry conf + Dockerfile + apply-spec.sh, Caddy TLS proxy, landing page, hardened systemd units |
 
@@ -62,21 +62,69 @@ Python file with no dependencies. `plugin/test_policy.py` and `cargo test` in
 The relay is **default-deny**: the write policy rejects every event whose
 kind is not explicitly allowed, at every ingest path (client publishes and
 negentropy sync alike), failing closed on anything malformed. The shipped
-set is exactly what the Goblin wallet uses:
+default set covers what the Goblin wallet and the Magick Market marketplace
+use:
 
 | Kind | Meaning |
 | --- | --- |
 | 0 | profile metadata |
+| 1 | text note (**author-locked**, see below) |
 | 3 | contact list |
 | 5 | deletion (NIP-09) |
+| 7 | reaction (NIP-25) |
 | 13 | seal (NIP-59) |
+| 14 / 16 / 17 | order chat / status / receipt (Gamma spec) |
 | 1059 | gift wrap (NIP-59) |
+| 1111 | comment (NIP-22) |
+| 10000 | mute / blacklist set (NIP-51) |
 | 10002 | relay list (NIP-65) |
 | 10050 | DM relays (NIP-17) |
+| 24133 | Nostr Connect / remote signing (NIP-46) |
 | 27235 | HTTP auth (NIP-98) |
+| 30000 / 30003 | people set / bookmark set (NIP-51) |
+| 30023 | long-form article (NIP-23, **author-locked**, see below) |
+| 30078 | app-specific data (NIP-78) |
+| 30402 / 30405 / 30406 | product listing / collection / shipping (NIP-99 + Gamma spec) |
+| 31990 | handler information (NIP-89) |
 
-To accept another kind, edit `FLOONET_ALLOWED_KINDS` in `.env` and restart
-the relay. Nothing else changes.
+Kinds `1` and `30023` are additionally author-locked (next section); every
+other kind here flows for everyone. To accept another kind, edit
+`FLOONET_ALLOWED_KINDS` and restart the relay (or just `touch` the plugin,
+since strfry reloads it on mtime change). Nothing else changes.
+
+## Public notes are author-locked
+
+Public-note kinds (`1` text notes, `30023` long-form articles) are accepted
+**only** from an operator-chosen list of authors. This is closed by default:
+with no authors configured, kinds `1` and `30023` are rejected for everyone,
+so random notes cannot be spammed to your relay. Everything else (profiles,
+gift wraps, marketplace listings, lists, ephemeral events) is unaffected, and
+kind `0` profiles stay open so wallets can republish them.
+
+You decide who can post. List the authors in `FLOONET_AUTHORIZED_AUTHORS`,
+comma-separated, each entry a hex pubkey or an npub (your choice):
+
+```sh
+FLOONET_AUTHORIZED_AUTHORS=npub1abc...,fd3a...hex...,npub1def...
+```
+
+Invalid entries are logged to stderr and skipped; the rest still apply.
+
+### Changing authors without recreating the container
+
+Where the container's environment cannot be changed without recreating it,
+drop a plain `KEY=VALUE` file named `floonet.env` next to the plugin script
+(override the path with `FLOONET_ENV_FILE`) and set the same keys there:
+
+```sh
+# /usr/local/bin/floonet.env
+FLOONET_AUTHORIZED_AUTHORS=npub1abc...,npub1def...
+```
+
+Real environment variables take precedence over the file. strfry reloads the
+plugin whenever the script's modification time changes, so after editing
+`floonet.env` just `touch` the plugin script and the next write picks up the
+new list. No relay or container restart is needed.
 
 ## Authentication (NIP-42), optional
 
@@ -168,7 +216,7 @@ event ids (replay rejection).
   `name@FLOONET_DOMAIN` just works. Nothing to configure.
 
 - **Split nginx deploy: opt in.** When the relay and the authority run on
-  separate subdomains (the `deploy/us-east/` pattern — relay on
+  separate subdomains (the `deploy/us-east/` pattern - relay on
   `relay.example`, the authority's own vhost on `nm.example`), enable it by
   including the shipped snippet in the relay vhost's `:443` server block,
   ahead of the WebSocket catch-all:
@@ -183,7 +231,7 @@ event ids (replay rejection).
   `https://relay.example/.well-known/nostr.json?name=<n>` returns the
   authority's JSON. Only the exact-match read path is co-located; registration
   and the rest of `/api/*` stay on the authority's own domain. The snippet sets
-  `X-Real-IP` (load-bearing — the authority's per-IP rate limiter keys off it).
+  `X-Real-IP` (load-bearing - the authority's per-IP rate limiter keys off it).
 
 ## Tor onion (optional)
 
@@ -257,7 +305,9 @@ essentials:
 | `FLOONET_DOMAIN` | `floonet.example` | your domain (names + TLS cert) |
 | `FLOONET_BASE_URL` | `https://floonet.example` | public base URL (NIP-98 verification) |
 | `FLOONET_RELAYS` | `wss://floonet.example` | relays advertised in nostr.json |
-| `FLOONET_ALLOWED_KINDS` | `0,3,5,13,1059,10002,10050,27235` | the whitelist |
+| `FLOONET_ALLOWED_KINDS` | Goblin + Magick Market set (see the whitelist section) | the kind whitelist |
+| `FLOONET_AUTHORIZED_AUTHORS` | unset (closed) | authors (hex or npub) allowed to post kinds `1`/`30023` |
+| `FLOONET_ENV_FILE` | `floonet.env` next to the plugin | optional `KEY=VALUE` config file (env vars win) |
 | `FLOONET_REQUIRE_AUTH` | `false` | NIP-42 gate |
 | `FLOONET_PAY_MODE` | `off` | `off` / `name` / `write` |
 | `FLOONET_NAME_PRICE_GRIN` | `0` | price of a name, in GRIN |
