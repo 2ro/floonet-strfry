@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Post-deploy smoke test for the public-note lockdown.
 
-Signs two throwaway events with a fresh (unauthorized) key and publishes them
-to a live relay, then checks the relay's OK responses:
+Signs four throwaway events with a fresh (unauthorized) key and publishes
+them to a live relay, then checks the relay's OK responses:
 
-    * kind 1 (text note)     -> expected BLOCKED  (author not authorized)
-    * kind 0 (profile)       -> expected ACCEPTED (profiles stay open)
+    * kind 1     (text note)         -> expected BLOCKED  (author not authorized)
+    * kind 0     (profile)           -> expected ACCEPTED (profiles stay open)
+    * kind 1059  (gift wrap)         -> expected ACCEPTED (money path ungated)
+    * kind 30023 (long-form article) -> expected BLOCKED  (author not authorized)
 
-Exit 0 only if both expectations hold. Zero third-party dependencies: a
+Exit 0 only if all four expectations hold. Zero third-party dependencies: a
 compact BIP-340 Schnorr signer and a minimal RFC-6455 client, both stdlib.
 
 Usage:
@@ -234,8 +236,45 @@ def main():
         return 2
     url = args[0]
     seckey = os.urandom(32)
-    note = make_signed_event(seckey, 1, "floonet lockdown smoke test; please ignore")
-    profile = make_signed_event(seckey, 0, json.dumps({"name": "floonet-smoke"}))
+
+    # A gift-wrap-shaped event: gift wraps are signed by throwaway keys
+    # anyway (NIP-59), p-tag the recipient, content is an opaque ciphertext
+    # blob (here random base64, ephemeral-ish; nobody will ever unwrap it).
+    recipient = pubkey_xonly(os.urandom(32)).hex()
+    wrap_blob = base64.b64encode(os.urandom(192)).decode()
+
+    checks = [
+        # (label, event, want_accept, failure explanation)
+        (
+            "kind 1 note",
+            make_signed_event(seckey, 1, "floonet lockdown smoke test; please ignore"),
+            False,
+            "an unauthorized author's text note was accepted",
+        ),
+        (
+            "kind 0 profile",
+            make_signed_event(seckey, 0, json.dumps({"name": "floonet-smoke"})),
+            True,
+            "a profile was blocked; kind 0 must stay open",
+        ),
+        (
+            "kind 1059 gift wrap",
+            make_signed_event(seckey, 1059, wrap_blob, tags=[["p", recipient]]),
+            True,
+            "a gift wrap was blocked; the money path must stay ungated",
+        ),
+        (
+            "kind 30023 long-form",
+            make_signed_event(
+                seckey,
+                30023,
+                "floonet lockdown smoke test article; please ignore",
+                tags=[["d", "floonet-smoke-test"], ["title", "smoke test"]],
+            ),
+            False,
+            "an unauthorized author's long-form article was accepted",
+        ),
+    ]
 
     print("relay:      %s" % url)
     print("throwaway:  %s (unauthorized by design)" % pubkey_xonly(seckey).hex())
@@ -243,20 +282,17 @@ def main():
     ws = WS(url, insecure=insecure)
     ok = True
     try:
-        accepted, why = publish_expect(ws, note, want_accept=False)
-        good = not accepted
-        ok = ok and good
-        print("kind 1 note:    %s  (expected BLOCKED)  msg=%r"
-              % ("BLOCKED" if not accepted else "ACCEPTED", why))
-        if accepted:
-            print("  FAIL: an unauthorized author's text note was accepted")
-
-        accepted, why = publish_expect(ws, profile, want_accept=True)
-        ok = ok and accepted
-        print("kind 0 profile: %s  (expected ACCEPTED) msg=%r"
-              % ("ACCEPTED" if accepted else "BLOCKED", why))
-        if not accepted:
-            print("  FAIL: a profile was blocked; kind 0 must stay open")
+        for label, event, want_accept, fail_msg in checks:
+            accepted, why = publish_expect(ws, event, want_accept=want_accept)
+            good = accepted == want_accept
+            ok = ok and good
+            print("%-22s %s  (expected %s) msg=%r"
+                  % (label + ":",
+                     "ACCEPTED" if accepted else "BLOCKED",
+                     "ACCEPTED" if want_accept else "BLOCKED",
+                     why))
+            if not good:
+                print("  FAIL: %s" % fail_msg)
     finally:
         ws.close()
 
