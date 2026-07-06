@@ -18,7 +18,7 @@
 // POST /api/v1/transfer/claim. Strictly non-custodial, no GoblinPay
 // involvement. See the README and docs-notes/name-transfer-spec.md.
 
-use floonet_name_authority::{handlers, App, Config};
+use floonet_name_authority::{handlers, setup, App, Config};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -28,6 +28,31 @@ async fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+
+    // Pick up a conventional env file if one exists (non-overriding), so a
+    // direct run reuses prior configuration. Under systemd/docker the real
+    // environment is already set, so this changes nothing there.
+    if let Some(path) = setup::load_first_existing() {
+        tracing::info!("loaded configuration from {}", path.display());
+    }
+
+    // First-run wizard: only when nothing is configured AND we are on a TTY.
+    // Existing deploys always set FLOONET_DOMAIN (compose/systemd) and are not
+    // interactive, so they never reach this branch.
+    if setup::decide_wizard(setup::config_present(), setup::is_interactive()) {
+        match setup::run_first_run_wizard() {
+            Ok(path) => {
+                if let Err(e) = setup::load_env_file(&path) {
+                    eprintln!("could not load the file just written ({}): {e}", path.display());
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("setup wizard failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     let cfg = match Config::from_env() {
         Ok(c) => c,

@@ -20,6 +20,7 @@ pub mod node;
 pub mod paid;
 pub mod proof;
 pub mod ratelimit;
+pub mod setup;
 pub mod util;
 
 pub use config::Config;
