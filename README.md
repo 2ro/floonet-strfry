@@ -204,6 +204,33 @@ NIP-98 requests are verified fully: signature, kind 27235, `u`/`method`/
 `payload` tags against `FLOONET_BASE_URL`, a freshness window, and one-time
 event ids (replay rejection).
 
+### Name transfers (optional, off by default)
+
+Mounted only when `FLOONET_TRANSFERS` is set; otherwise these routes do not
+exist and requests 404. Independent of `FLOONET_PAY_MODE`: the two features
+toggle in any combination.
+
+| Endpoint | Auth | Purpose |
+| --- | --- | --- |
+| `POST /api/v1/transfer/offer` `{offer}` | NIP-98 (seller) | lodge a signed kind-3402 sale offer |
+| `GET /api/v1/transfer/offer/{id}` | none | read an offer + its status (CORS `*`) |
+| `DELETE /api/v1/transfer/offer/{id}` | NIP-98 (seller) | revoke a live offer |
+| `POST /api/v1/transfer/claim` `{offer_id, proof}` | NIP-98 (buyer) | claim the name with a Grin payment proof |
+
+A **name transfer** reassigns an active name from the seller's pubkey to the
+buyer's. It is **strictly non-custodial and has zero GoblinPay involvement**:
+the buyer pays the seller directly, wallet to wallet in Grin, and the authority
+never holds funds. The seller lodges a signed offer (a kind-3402 event binding
+name, buyer pubkey, price, receiving address, and expiry); the buyer pays on
+chain and submits the six-field Grin payment proof; the authority verifies both
+signatures over the canonical 73-byte message, confirms the kernel on chain
+(`FLOONET_TRANSFER_MIN_CONF` deep) via a read-only node foreign API, checks the
+exact amount and receiving address, ensures the kernel excess was never used
+before, and then swaps one database row in a single atomic transaction. Keys
+never move - only the name's pubkey changes. Enabling this needs a reachable
+Grin node foreign API (`FLOONET_GRIN_NODE_URL`). The full protocol is specified
+in the Goblin Name Transfer Protocol v1 spec.
+
 ## Co-locating names on the relay domain
 
 `FLOONET_AUTHORITY_COLOCATED` controls whether the authority's NIP-05 lookup
@@ -314,6 +341,11 @@ essentials:
 | `FLOONET_WRITE_PRICE_GRIN` | `0` | price of write access, in GRIN |
 | `GOBLINPAY_URL` / `GOBLINPAY_TOKEN` | unset | your GoblinPay server |
 | `GOBLINPAY_WEBHOOK_SECRET` | unset | enables the webhook receiver |
+| `FLOONET_TRANSFERS` | `false` | enable the name-transfer routes (off = they 404) |
+| `FLOONET_GRIN_NODE_URL` | unset | Grin node foreign API(s) for payment confirmation (**required** when transfers are on) |
+| `FLOONET_TRANSFER_MIN_CONF` | `10` | confirmations a payment kernel needs before a claim |
+| `FLOONET_TRANSFER_MAX_OFFER_TTL` | `2592000` | longest offer time-to-live in seconds (30 days) |
+| `FLOONET_TRANSFER_CLAIM_GRACE` | `86400` | grace window in seconds for a claim after an offer dies (1 day) |
 | `COMPOSE_PROFILES` | unset | `tor` also runs a Tor onion in front of the relay |
 
 ## Note for Goblin wallet users

@@ -12,6 +12,11 @@
 //   POST   /api/v1/goblinpay/webhook             HMAC-verified payment nudge
 //   GET    /api/v1/health                        liveness
 //   GET    /                                     landing page
+//
+// When FLOONET_TRANSFERS is set, the name-transfer routes are also mounted
+// (else they 404): POST/GET/DELETE /api/v1/transfer/offer[/{id}] and
+// POST /api/v1/transfer/claim. Strictly non-custodial, no GoblinPay
+// involvement. See the README and docs-notes/name-transfer-spec.md.
 
 use floonet_name_authority::{handlers, App, Config};
 use std::sync::Arc;

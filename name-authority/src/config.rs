@@ -85,10 +85,38 @@ pub struct Config {
     pub goblinpay_webhook_secret: Option<String>,
     /// Minimum interval between GoblinPay status polls per grant.
     pub paid_poll_interval: Duration,
+
+    /// Name-transfer (offer/claim marketplace) support. Default OFF: when
+    /// false the transfer routes are not mounted at all (requests 404). Fully
+    /// independent of `pay_mode`: transfers are strictly non-custodial and
+    /// never involve GoblinPay.
+    pub allow_transfers: bool,
+    /// Grin node foreign-API base URL(s), comma-separated. Required when
+    /// `allow_transfers` is set (used for `get_kernel`/`get_tip`); validated
+    /// fail-fast at startup.
+    pub grin_node_url: Option<String>,
+    /// Confirmations a payment kernel needs before a claim is accepted.
+    pub transfer_min_conf: u64,
+    /// Longest offer time-to-live (seconds): an offer's `expiration` must be
+    /// within `[now, now + transfer_max_offer_ttl]` at lodging.
+    pub transfer_max_offer_ttl: i64,
+    /// Grace window (seconds) after an offer is revoked or expires during which
+    /// a claim that settled before the offer died is still honored.
+    pub transfer_claim_grace: i64,
 }
 
 fn env_string(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    match std::env::var(key) {
+        Ok(v) => matches!(
+            v.trim().to_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => default,
+    }
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -201,6 +229,16 @@ impl Config {
         let paid_poll_interval =
             Duration::from_secs(env_parse("FLOONET_PAID_POLL_INTERVAL_SECS", 5u64));
 
+        // Name transfers. Off by default and fully independent of pay_mode.
+        let allow_transfers = env_bool("FLOONET_TRANSFERS", false);
+        let grin_node_url = std::env::var("FLOONET_GRIN_NODE_URL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let transfer_min_conf = env_parse("FLOONET_TRANSFER_MIN_CONF", 10u64);
+        let transfer_max_offer_ttl = env_parse("FLOONET_TRANSFER_MAX_OFFER_TTL", 2_592_000i64);
+        let transfer_claim_grace = env_parse("FLOONET_TRANSFER_CLAIM_GRACE", 86_400i64);
+
         let cfg = Config {
             domain,
             base_url,
@@ -223,6 +261,11 @@ impl Config {
             goblinpay_token,
             goblinpay_webhook_secret,
             paid_poll_interval,
+            allow_transfers,
+            grin_node_url,
+            transfer_min_conf,
+            transfer_max_offer_ttl,
+            transfer_claim_grace,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -278,7 +321,28 @@ impl Config {
         if self.pay_mode == PayMode::Write && self.write_price_nanogrin == 0 {
             return Err("FLOONET_PAY_MODE=write needs FLOONET_WRITE_PRICE_GRIN > 0".into());
         }
+        // Transfers need a Grin node to confirm payment kernels; refuse to
+        // start half-configured rather than fail every claim at runtime.
+        if self.allow_transfers && self.grin_node_url.is_none() {
+            return Err(
+                "FLOONET_TRANSFERS is set but FLOONET_GRIN_NODE_URL is empty \
+                 (a Grin node foreign API is required to confirm payment kernels)"
+                    .into(),
+            );
+        }
         Ok(())
+    }
+
+    /// Parse `grin_node_url` into a list of foreign-API endpoints (comma or
+    /// whitespace separated). Empty when transfers are off.
+    pub fn grin_node_endpoints(&self) -> Vec<String> {
+        self.grin_node_url
+            .as_deref()
+            .unwrap_or("")
+            .split([',', ' ', '\t', '\n'])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
     }
 
     /// One-line summary for the startup log. The GoblinPay token is a secret
@@ -288,7 +352,8 @@ impl Config {
             "domain={} base_url={} relays={:?} bind={} db={} \
              name_len={}..={} cooldown={}s auth_max_age={}s \
              read={}req/{}s write={}req/{}s reserved_extra={} \
-             pay_mode={:?} name_price={}g write_price={}g goblinpay={}",
+             pay_mode={:?} name_price={}g write_price={}g goblinpay={} \
+             transfers={}",
             self.domain,
             self.base_url,
             self.relays,
@@ -310,6 +375,17 @@ impl Config {
                 "unset"
             } else {
                 &self.goblinpay_url
+            },
+            if self.allow_transfers {
+                format!(
+                    "on(node={} min_conf={} max_ttl={}s grace={}s)",
+                    self.grin_node_url.as_deref().unwrap_or("-"),
+                    self.transfer_min_conf,
+                    self.transfer_max_offer_ttl,
+                    self.transfer_claim_grace,
+                )
+            } else {
+                "off".to_string()
             },
         )
     }
@@ -358,6 +434,13 @@ impl Config {
             goblinpay_token: String::new(),
             goblinpay_webhook_secret: None,
             paid_poll_interval: Duration::ZERO,
+            // Transfers off by default in tests; the transfer suite flips these
+            // on and injects a test chain source.
+            allow_transfers: false,
+            grin_node_url: None,
+            transfer_min_conf: 10,
+            transfer_max_offer_ttl: 2_592_000,
+            transfer_claim_grace: 86_400,
         }
     }
 }
@@ -435,5 +518,38 @@ mod tests {
         assert!(grin_to_nanogrin("1,5").is_err());
         assert_eq!(nanogrin_to_grin(1_500_000_000), "1.5");
         assert_eq!(nanogrin_to_grin(2_000_000_000), "2");
+    }
+
+    #[test]
+    fn transfers_on_without_node_url_fails_fast() {
+        let mut c = base();
+        c.allow_transfers = true;
+        c.grin_node_url = None;
+        assert!(c.validate().is_err());
+        // With a node URL it validates.
+        c.grin_node_url = Some("https://node.example/v2/foreign".into());
+        assert!(c.validate().is_ok());
+        assert_eq!(
+            c.grin_node_endpoints(),
+            vec!["https://node.example/v2/foreign".to_string()]
+        );
+    }
+
+    #[test]
+    fn transfers_and_pay_mode_are_independent() {
+        // Transfers on + pay off is valid, and pay on + transfers off is valid:
+        // the two features toggle independently in any combination.
+        let mut c = base();
+        c.allow_transfers = true;
+        c.grin_node_url = Some("https://node.example/v2/foreign".into());
+        assert!(c.validate().is_ok());
+        assert_eq!(c.pay_mode, PayMode::Off);
+
+        // Both on together also validates.
+        c.pay_mode = PayMode::Name;
+        c.goblinpay_url = "https://pay.example".into();
+        c.goblinpay_token = "tok".into();
+        c.name_price_nanogrin = grin_to_nanogrin("1").unwrap();
+        assert!(c.validate().is_ok());
     }
 }
