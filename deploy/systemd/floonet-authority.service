@@ -1,16 +1,32 @@
 # Hardened systemd unit for the Floonet name authority on bare metal.
 #
-# Install:
+# Recommended: the guided installer wires all of this up for you, including the
+# secret credential drop-in below:
+#   sudo ./install.sh            # builds, installs this unit, runs the wizard
+#
+# By hand:
 #   cd name-authority && cargo build --release
 #   sudo install -m0755 target/release/floonet-name-authority /usr/local/bin/
-#   sudo install -m0640 ../.env /etc/floonet-authority.env    # see .env.example
+#   sudo floonet-name-authority setup        # writes /etc/floonet-authority.env
 #   sudo install -m0644 ../deploy/systemd/floonet-authority.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now floonet-authority
 #
 # The service stores only public data plus payment grant state, but it is
 # still locked down: dynamic unprivileged user, read-only system, no new
-# privileges. Keep the GoblinPay token out of world-readable files (the env
-# file above is 0640, or use GOBLINPAY_TOKEN_FILE pointing at a 0400 file).
+# privileges. A free authority (FLOONET_PAY_MODE=off) holds NO secret at all.
+#
+# When a paid mode is configured, the GoblinPay token is a secret and must never
+# sit in the (root:root 0640, but proxy/backup-exposable) env file. The wizard
+# writes it to /etc/floonet-authority/secrets/goblinpay_token at mode 0600 and
+# the installer drops in floonet-authority.service.d/10-goblinpay-credential.conf
+# with:
+#   [Service]
+#   LoadCredential=goblinpay_token:/etc/floonet-authority/secrets/goblinpay_token
+#   Environment=GOBLINPAY_TOKEN_FILE=%d/goblinpay_token
+# so systemd (as root) loads the 0600 file and exposes a copy under
+# $CREDENTIALS_DIRECTORY (%d) that the dynamic service user can read. That
+# Environment= overrides the /etc path the env file names. The base unit stays
+# valid for a free deploy because the LoadCredential lives only in the drop-in.
 
 [Unit]
 Description=Floonet name authority (name@domain -> nostr pubkey)

@@ -21,6 +21,8 @@
 // finds it, sets FLOONET_DOMAIN, and the wizard stays out of the way.
 
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 /// The bare-metal / systemd convention: deploy/systemd/floonet-authority.service
@@ -61,7 +63,9 @@ pub fn load_first_existing() -> Option<PathBuf> {
 /// deployment sets, FLOONET_DOMAIN, is present in the environment. Call this
 /// after load_first_existing() so a previously written env file counts.
 pub fn config_present() -> bool {
-    std::env::var("FLOONET_DOMAIN").map(|v| !v.is_empty()).unwrap_or(false)
+    std::env::var("FLOONET_DOMAIN")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
 }
 
 /// Are we attached to an interactive terminal on both stdin and stdout?
@@ -159,7 +163,7 @@ pub fn load_env_file(path: &Path) -> io::Result<usize> {
 
 /// The answers the wizard collects. Kept separate from rendering so the render
 /// step is a pure, testable function.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Answers {
     pub domain: String,
     pub bind_addr: String,
@@ -167,7 +171,20 @@ pub struct Answers {
     pub pay_mode: String,
     pub price_grin: String,
     pub goblinpay_url: String,
+    /// The GoblinPay API token, a SECRET, collected via a hidden prompt. It is
+    /// never written into the (potentially world-readable) env file: the wizard
+    /// writes it to a root-only `0600` file and the env file references that
+    /// file's path via `token_file` below. Kept here only in memory.
     pub goblinpay_token: String,
+    /// Optional GoblinPay webhook HMAC secret, also a secret, same handling as
+    /// the token. Empty when the operator does not configure a webhook.
+    pub goblinpay_webhook_secret: String,
+    /// Path of the `0600` file the token was written to, referenced from the env
+    /// file as `GOBLINPAY_TOKEN_FILE`. Filled in by `run_wizard`, not prompted.
+    pub token_file: String,
+    /// Path of the `0600` webhook-secret file, referenced as
+    /// `GOBLINPAY_WEBHOOK_SECRET_FILE`. Empty when no webhook secret was given.
+    pub webhook_secret_file: String,
     pub transfers: bool,
     pub grin_node_url: String,
 }
@@ -184,10 +201,7 @@ pub fn render_env(a: &Answers) -> String {
     s.push_str(&format!("FLOONET_BASE_URL=https://{}\n", a.domain));
     s.push_str(&format!("FLOONET_RELAYS=wss://{}\n", a.domain));
     s.push_str(&format!("FLOONET_NAMES_BIND={}\n", a.bind_addr));
-    s.push_str(&format!(
-        "FLOONET_NAMES_DB={}\n",
-        db_path_in(&a.data_dir)
-    ));
+    s.push_str(&format!("FLOONET_NAMES_DB={}\n", db_path_in(&a.data_dir)));
     s.push_str(&format!("FLOONET_PAY_MODE={}\n", a.pay_mode));
     match a.pay_mode.as_str() {
         "name" => s.push_str(&format!("FLOONET_NAME_PRICE_GRIN={}\n", a.price_grin)),
@@ -196,7 +210,15 @@ pub fn render_env(a: &Answers) -> String {
     }
     if a.pay_mode != "off" {
         s.push_str(&format!("GOBLINPAY_URL={}\n", a.goblinpay_url));
-        s.push_str(&format!("GOBLINPAY_TOKEN={}\n", a.goblinpay_token));
+        // The token is a secret: the env file only names the 0600 file it was
+        // written to, never the token itself. config.rs reads the file.
+        s.push_str(&format!("GOBLINPAY_TOKEN_FILE={}\n", a.token_file));
+        if !a.webhook_secret_file.is_empty() {
+            s.push_str(&format!(
+                "GOBLINPAY_WEBHOOK_SECRET_FILE={}\n",
+                a.webhook_secret_file
+            ));
+        }
     }
     if a.transfers {
         s.push_str("FLOONET_TRANSFERS=true\n");
@@ -207,7 +229,10 @@ pub fn render_env(a: &Answers) -> String {
 
 /// Join a data directory with the fixed `names.db` filename.
 pub fn db_path_in(dir: &str) -> String {
-    Path::new(dir).join("names.db").to_string_lossy().into_owned()
+    Path::new(dir)
+        .join("names.db")
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Drive the interactive prompts over the given reader/writer, returning the
@@ -215,20 +240,43 @@ pub fn db_path_in(dir: &str) -> String {
 pub fn collect_answers<R: BufRead, W: Write>(
     r: &mut R,
     w: &mut W,
+    hidden: bool,
 ) -> io::Result<Answers> {
     writeln!(w, "\nFloonet name authority: first-run setup")?;
-    writeln!(w, "No configuration found. A few questions and we are running.")?;
+    writeln!(
+        w,
+        "No configuration found. A few questions and we are running."
+    )?;
     writeln!(w, "Press Enter to accept each [default].\n")?;
 
-    let domain = prompt(r, w, "Domain for names (the @domain in name@domain)", "floonet.example")?;
+    let domain = prompt(
+        r,
+        w,
+        "Domain for names (the @domain in name@domain)",
+        "floonet.example",
+    )?;
     let bind_addr = prompt(r, w, "HTTP bind address", "127.0.0.1:8191")?;
-    let data_dir = prompt(r, w, "Data directory (SQLite database lives here)", "/var/lib/floonet-authority")?;
+    let data_dir = prompt(
+        r,
+        w,
+        "Data directory (SQLite database lives here)",
+        "/var/lib/floonet-authority",
+    )?;
 
-    writeln!(w, "\nCharging GRIN is optional; leave as `off` for a free authority.")?;
-    let pay_mode = prompt_choice(r, w, "Pay mode (off/name/write)", "off", &["off", "name", "write"])?;
+    writeln!(
+        w,
+        "\nCharging GRIN is optional; leave as `off` for a free authority."
+    )?;
+    let pay_mode = prompt_choice(
+        r,
+        w,
+        "Pay mode (off/name/write)",
+        "off",
+        &["off", "name", "write"],
+    )?;
 
-    let (mut price_grin, mut goblinpay_url, mut goblinpay_token) =
-        (String::new(), String::new(), String::new());
+    let (mut price_grin, mut goblinpay_url, mut goblinpay_token, mut goblinpay_webhook_secret) =
+        (String::new(), String::new(), String::new(), String::new());
     if pay_mode != "off" {
         let price_q = if pay_mode == "name" {
             "Price to claim a name, in GRIN"
@@ -238,15 +286,37 @@ pub fn collect_answers<R: BufRead, W: Write>(
         // A paid mode with a zero price fails validation, so default to 1.
         price_grin = prompt(r, w, price_q, "1")?;
         goblinpay_url = prompt(r, w, "GoblinPay server URL", "http://127.0.0.1:8192")?;
-        goblinpay_token = prompt(r, w, "GoblinPay API token", "")?;
+        // The token is a secret: read it with terminal echo off so it never
+        // shows on screen, and store it to a root-only 0600 file (never the
+        // env file). Enter leaves it blank; validation then refuses to start.
+        goblinpay_token = prompt_secret(r, w, "GoblinPay API token (input hidden)", hidden)?;
+        writeln!(
+            w,
+            "\nOptional: a GoblinPay webhook HMAC secret confirms payments \
+             instantly instead of on the next poll."
+        )?;
+        goblinpay_webhook_secret = prompt_secret(
+            r,
+            w,
+            "GoblinPay webhook secret (input hidden, Enter to skip)",
+            hidden,
+        )?;
     }
 
-    writeln!(w, "\nName transfers are the optional non-custodial name marketplace.")?;
+    writeln!(
+        w,
+        "\nName transfers are the optional non-custodial name marketplace."
+    )?;
     let transfers = prompt_yes_no(r, w, "Enable name transfers?", false)?;
     let mut grin_node_url = String::new();
     if transfers {
         // Required when transfers are on, or the authority refuses to start.
-        grin_node_url = prompt(r, w, "Grin node foreign-API URL", "https://api.grin.money/v2/foreign")?;
+        grin_node_url = prompt(
+            r,
+            w,
+            "Grin node foreign-API URL",
+            "https://api.grin.money/v2/foreign",
+        )?;
     }
 
     Ok(Answers {
@@ -257,6 +327,11 @@ pub fn collect_answers<R: BufRead, W: Write>(
         price_grin,
         goblinpay_url,
         goblinpay_token,
+        goblinpay_webhook_secret,
+        // Secret file paths are resolved and written by run_wizard, which knows
+        // where the env file lives; left empty here.
+        token_file: String::new(),
+        webhook_secret_file: String::new(),
         transfers,
         grin_node_url,
     })
@@ -268,8 +343,31 @@ pub fn run_wizard<R: BufRead, W: Write>(
     r: &mut R,
     w: &mut W,
     target: &Path,
+    hidden: bool,
 ) -> io::Result<PathBuf> {
-    let answers = collect_answers(r, w)?;
+    let mut answers = collect_answers(r, w, hidden)?;
+
+    // Secrets (the GoblinPay token and any webhook secret) are written to a
+    // root-only 0600 file in a sibling secrets directory, NEVER into the env
+    // file, which a reverse proxy or backup may expose. The env file only names
+    // the file paths; config.rs and the systemd credential wiring read them.
+    if answers.pay_mode != "off" {
+        let secrets_dir = secrets_dir_for(target);
+        std::fs::create_dir_all(&secrets_dir)?;
+        // 0700 the directory so only its owner (root) can traverse it.
+        let _ = std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o700));
+
+        let token_path = secrets_dir.join("goblinpay_token");
+        write_secret_file(&token_path, &answers.goblinpay_token)?;
+        answers.token_file = token_path.to_string_lossy().into_owned();
+
+        if !answers.goblinpay_webhook_secret.is_empty() {
+            let hook_path = secrets_dir.join("goblinpay_webhook_secret");
+            write_secret_file(&hook_path, &answers.goblinpay_webhook_secret)?;
+            answers.webhook_secret_file = hook_path.to_string_lossy().into_owned();
+        }
+    }
+
     let body = render_env(&answers);
     if let Some(dir) = target.parent() {
         if !dir.as_os_str().is_empty() {
@@ -277,19 +375,56 @@ pub fn run_wizard<R: BufRead, W: Write>(
         }
     }
     std::fs::write(target, body)?;
+    if !answers.token_file.is_empty() {
+        writeln!(
+            w,
+            "Wrote the GoblinPay token to {} (mode 0600, root only).",
+            answers.token_file
+        )?;
+    }
     writeln!(w, "\nWrote {}. Starting up...\n", target.display())?;
     Ok(target.to_path_buf())
+}
+
+/// The sibling directory that holds the wizard's 0600 secret files, derived from
+/// where the env file lives: `/etc/floonet-authority.env` yields
+/// `/etc/floonet-authority/secrets`, and the docker-compose `./.env` yields
+/// `./floonet-authority/secrets`. Kept next to the env file so both deployment
+/// conventions get a predictable, self-contained secrets location.
+pub fn secrets_dir_for(env_file: &Path) -> PathBuf {
+    let parent = env_file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    parent.join("floonet-authority").join("secrets")
+}
+
+/// Write `contents` to `path` at mode 0600 (root read/write only). Any existing
+/// file is removed first so a re-run (reconfigure) is not denied by a prior
+/// read-only secret. A trailing newline is added for tidy `cat`/editor output;
+/// config.rs trims it back off on read.
+fn write_secret_file(path: &Path, contents: &str) -> io::Result<()> {
+    let _ = std::fs::remove_file(path);
+    let mut body = contents.trim().to_string();
+    body.push('\n');
+    std::fs::write(path, body)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
 }
 
 /// Convenience entry point for main: pick the conventional target, run the
 /// wizard over the real stdin/stdout, and return the file written.
 pub fn run_first_run_wizard() -> io::Result<PathBuf> {
     let target = wizard_target();
+    // Hidden secret entry only makes sense on a real terminal; is_interactive()
+    // gates the whole wizard, so this is true whenever a secret is prompted.
+    let hidden = is_interactive();
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let stdout = io::stdout();
     let mut writer = stdout.lock();
-    run_wizard(&mut reader, &mut writer, &target)
+    run_wizard(&mut reader, &mut writer, &target, hidden)
 }
 
 fn prompt<R: BufRead, W: Write>(
@@ -351,4 +486,69 @@ fn prompt_yes_no<R: BufRead, W: Write>(
         // Anything else (including the echoed default token) keeps the default.
         _ => default,
     })
+}
+
+/// Prompt for a secret. When `hidden` (a real TTY) terminal echo is turned off
+/// for the read so the typed value never appears on screen or in scrollback;
+/// the Enter keystroke is not echoed either, so we print the newline ourselves.
+/// Reads through the SAME reader in both cases (no second stdin handle) so it is
+/// exercisable in tests with `hidden = false` over a Cursor.
+fn prompt_secret<R: BufRead, W: Write>(
+    r: &mut R,
+    w: &mut W,
+    question: &str,
+    hidden: bool,
+) -> io::Result<String> {
+    write!(w, "{question}: ")?;
+    w.flush()?;
+    let mut line = String::new();
+    let read = if hidden {
+        let _echo_off = EchoOff::new();
+        let n = r.read_line(&mut line)?;
+        drop(_echo_off);
+        writeln!(w)?;
+        n
+    } else {
+        r.read_line(&mut line)?
+    };
+    if read == 0 {
+        return Ok(String::new());
+    }
+    Ok(line.trim().to_string())
+}
+
+/// RAII guard that disables terminal echo on stdin for its lifetime and restores
+/// the prior state on drop. If stdin is not a real terminal (a pipe/test stream)
+/// tcgetattr fails and this is an inert no-op, so callers pass `hidden = false`
+/// in that case anyway. Only tcgetattr/tcsetattr are used.
+struct EchoOff {
+    fd: i32,
+    orig: Option<libc::termios>,
+}
+
+impl EchoOff {
+    fn new() -> EchoOff {
+        let fd = io::stdin().as_raw_fd();
+        let mut orig = None;
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut t) == 0 {
+                orig = Some(t);
+                let mut modt = t;
+                modt.c_lflag &= !libc::ECHO;
+                let _ = libc::tcsetattr(fd, libc::TCSANOW, &modt);
+            }
+        }
+        EchoOff { fd, orig }
+    }
+}
+
+impl Drop for EchoOff {
+    fn drop(&mut self) {
+        if let Some(orig) = self.orig {
+            unsafe {
+                let _ = libc::tcsetattr(self.fd, libc::TCSANOW, &orig);
+            }
+        }
+    }
 }

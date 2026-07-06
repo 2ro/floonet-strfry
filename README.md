@@ -18,7 +18,29 @@ through strfry's own extension points:
 
 ## Deploy
 
-Pick your comfort level. All three paths produce the same relay.
+Pick your comfort level. All paths produce the same relay.
+
+### 0. Guided installer (easiest, Grin-style)
+
+```sh
+sudo ./install.sh
+```
+
+One interactive script. It asks a single topology question - whether to run the
+bundled name service **alongside the relay** (co-located on one domain), on a
+**separate domain**, **relay only**, or the **name authority standalone** - then
+builds what you chose, installs the hardened systemd units, and hands off to the
+name authority's own setup wizard. Every prompt has a sensible default. Any
+secret (the GoblinPay API token) is collected over a **hidden prompt** and
+written to a root-only `0600` file, never the env file; the installer wires it
+to the service as a systemd credential. Re-runnable, and it never clobbers an
+existing config. Prefer this unless you want Docker.
+
+The name authority also runs its wizard on its own: with nothing configured, a
+bare `floonet-name-authority` on a terminal offers it, or run it explicitly with
+`floonet-name-authority setup` (`--reconfigure` to redo an existing config). When
+`FLOONET_DOMAIN` is set (compose/systemd), the wizard never fires - those deploys
+stay fully headless.
 
 ### 1. Docker Compose (recommended)
 
@@ -152,6 +174,11 @@ FLOONET_NAME_PRICE_GRIN=1.5    # what a name costs, in GRIN
 GOBLINPAY_URL=https://pay.your.domain
 GOBLINPAY_TOKEN=<GP_API_TOKEN from your GoblinPay>
 ```
+
+The token is a secret. The guided installer and the `floonet-name-authority
+setup` wizard collect it over a hidden prompt and store it in a root-only `0600`
+file referenced by `GOBLINPAY_TOKEN_FILE`, so it never lands in the env file;
+set `GOBLINPAY_TOKEN` inline only for a throwaway local test.
 
 Modes:
 
@@ -327,9 +354,13 @@ system tor with the snippet in `deploy/tor/torrc` (a `HiddenServiceDir` plus a
 - **Rate limits** per IP on the authority's read and write endpoints,
   NIP-98 replay protection, name-change cooldown, and a poll throttle so
   outsiders cannot hammer GoblinPay through the public paid endpoint.
-- **No secrets in the repo.** The GoblinPay token comes from the environment
-  or a `0400` file via `GOBLINPAY_TOKEN_FILE`; the authority never logs it.
-  The relay itself holds no secrets at all.
+- **No secrets in the repo, and none in world-readable files.** The GoblinPay
+  token is collected by the setup wizard over a hidden prompt and written to a
+  root-only `0600` file that `GOBLINPAY_TOKEN_FILE` names (the systemd unit
+  exposes it to the service as a credential, so the dynamic user reads a copy
+  without the file being broadly readable). It is never written to the env file
+  and never logged. A free authority holds no secret at all, and the relay
+  itself holds none in any mode.
 - `events.maxEventSize` is sized so large gift-wrapped payloads fit.
 
 ## Configuration reference
@@ -349,8 +380,9 @@ essentials:
 | `FLOONET_PAY_MODE` | `off` | `off` / `name` / `write` |
 | `FLOONET_NAME_PRICE_GRIN` | `0` | price of a name, in GRIN |
 | `FLOONET_WRITE_PRICE_GRIN` | `0` | price of write access, in GRIN |
-| `GOBLINPAY_URL` / `GOBLINPAY_TOKEN` | unset | your GoblinPay server |
-| `GOBLINPAY_WEBHOOK_SECRET` | unset | enables the webhook receiver |
+| `GOBLINPAY_URL` | unset | your GoblinPay server base URL |
+| `GOBLINPAY_TOKEN_FILE` / `GOBLINPAY_TOKEN` | unset | API token; prefer the `0600` `_FILE` form the wizard writes over the inline value |
+| `GOBLINPAY_WEBHOOK_SECRET_FILE` / `GOBLINPAY_WEBHOOK_SECRET` | unset | enables the webhook receiver; `_FILE` keeps the secret out of the env file |
 | `FLOONET_TRANSFERS` | `false` | enable the name-transfer routes (off = they 404) |
 | `FLOONET_GRIN_NODE_URL` | unset | Grin node foreign API(s) for payment confirmation (**required** when transfers are on) |
 | `FLOONET_TRANSFER_MIN_CONF` | `10` | confirmations a payment kernel needs before a claim |

@@ -224,8 +224,22 @@ impl Config {
                 .to_string(),
             _ => env_string("GOBLINPAY_TOKEN", ""),
         };
-        let goblinpay_webhook_secret =
-            std::env::var("GOBLINPAY_WEBHOOK_SECRET").ok().filter(|s| !s.is_empty());
+        // Webhook secret: prefer a 0600 file (GOBLINPAY_WEBHOOK_SECRET_FILE,
+        // what the setup wizard and the systemd credential wiring use) over an
+        // inline GOBLINPAY_WEBHOOK_SECRET, so the secret need never sit in a
+        // world-readable env file.
+        let goblinpay_webhook_secret = match std::env::var("GOBLINPAY_WEBHOOK_SECRET_FILE") {
+            Ok(path) if !path.is_empty() => Some(
+                std::fs::read_to_string(&path)
+                    .map_err(|e| format!("GOBLINPAY_WEBHOOK_SECRET_FILE `{path}` unreadable: {e}"))?
+                    .trim()
+                    .to_string(),
+            )
+            .filter(|s| !s.is_empty()),
+            _ => std::env::var("GOBLINPAY_WEBHOOK_SECRET")
+                .ok()
+                .filter(|s| !s.is_empty()),
+        };
         let paid_poll_interval =
             Duration::from_secs(env_parse("FLOONET_PAID_POLL_INTERVAL_SECS", 5u64));
 
@@ -308,11 +322,9 @@ impl Config {
                 return Err("FLOONET_PAY_MODE is on but GOBLINPAY_URL is not set".into());
             }
             if self.goblinpay_token.is_empty() {
-                return Err(
-                    "FLOONET_PAY_MODE is on but no GoblinPay token is set \
+                return Err("FLOONET_PAY_MODE is on but no GoblinPay token is set \
                      (GOBLINPAY_TOKEN or GOBLINPAY_TOKEN_FILE)"
-                        .into(),
-                );
+                    .into());
             }
         }
         if self.pay_mode == PayMode::Name && self.name_price_nanogrin == 0 {

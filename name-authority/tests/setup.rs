@@ -18,16 +18,28 @@ use floonet_name_authority::setup::{
 /// "config-present means the wizard never triggers" test.
 #[test]
 fn config_present_never_runs_wizard() {
-    assert!(!setup::decide_wizard(true, true), "present + tty must skip wizard");
-    assert!(!setup::decide_wizard(true, false), "present + no tty must skip wizard");
+    assert!(
+        !setup::decide_wizard(true, true),
+        "present + tty must skip wizard"
+    );
+    assert!(
+        !setup::decide_wizard(true, false),
+        "present + no tty must skip wizard"
+    );
 }
 
 /// The only case that runs the wizard: nothing configured AND an interactive
 /// terminal. A non-TTY with no config stays headless (today's behavior).
 #[test]
 fn wizard_only_when_absent_and_interactive() {
-    assert!(setup::decide_wizard(false, true), "absent + tty runs wizard");
-    assert!(!setup::decide_wizard(false, false), "absent + no tty stays headless");
+    assert!(
+        setup::decide_wizard(false, true),
+        "absent + tty runs wizard"
+    );
+    assert!(
+        !setup::decide_wizard(false, false),
+        "absent + no tty stays headless"
+    );
 }
 
 #[test]
@@ -48,7 +60,10 @@ BLANKVAL=
         pairs,
         vec![
             ("FLOONET_DOMAIN".to_string(), "names.example".to_string()),
-            ("FLOONET_BASE_URL".to_string(), "https://names.example".to_string()),
+            (
+                "FLOONET_BASE_URL".to_string(),
+                "https://names.example".to_string()
+            ),
             ("QUOTED".to_string(), "a value".to_string()),
             ("SINGLE".to_string(), "b value".to_string()),
             ("BLANKVAL".to_string(), "".to_string()),
@@ -63,11 +78,7 @@ fn render_env_derives_base_url_and_relays_from_domain() {
         bind_addr: "127.0.0.1:8191".into(),
         data_dir: "/var/lib/floonet-authority".into(),
         pay_mode: "off".into(),
-        price_grin: String::new(),
-        goblinpay_url: String::new(),
-        goblinpay_token: String::new(),
-        transfers: false,
-        grin_node_url: String::new(),
+        ..Default::default()
     };
     let body = render_env(&a);
     // base_url and relays are derived so the validate() host==domain invariant
@@ -91,14 +102,19 @@ fn render_env_paid_name_and_transfers() {
         price_grin: "1".into(),
         goblinpay_url: "http://127.0.0.1:8192".into(),
         goblinpay_token: "tok".into(),
+        // The env file references the secret FILE, never the token itself.
+        token_file: "/etc/floonet-authority/secrets/goblinpay_token".into(),
         transfers: true,
         grin_node_url: "https://api.grin.money/v2/foreign".into(),
+        ..Default::default()
     };
     let body = render_env(&a);
     assert!(body.contains("FLOONET_PAY_MODE=name\n"));
     assert!(body.contains("FLOONET_NAME_PRICE_GRIN=1\n"));
     assert!(body.contains("GOBLINPAY_URL=http://127.0.0.1:8192\n"));
-    assert!(body.contains("GOBLINPAY_TOKEN=tok\n"));
+    // The token is referenced by file path; the plaintext token never appears.
+    assert!(body.contains("GOBLINPAY_TOKEN_FILE=/etc/floonet-authority/secrets/goblinpay_token\n"));
+    assert!(!body.contains("GOBLINPAY_TOKEN=tok"));
     assert!(body.contains("FLOONET_TRANSFERS=true\n"));
     assert!(body.contains("FLOONET_GRIN_NODE_URL=https://api.grin.money/v2/foreign\n"));
     // write-only key must not leak into a name-mode file.
@@ -107,7 +123,10 @@ fn render_env_paid_name_and_transfers() {
 
 #[test]
 fn db_path_joins_names_db() {
-    assert_eq!(db_path_in("/var/lib/floonet-authority"), "/var/lib/floonet-authority/names.db");
+    assert_eq!(
+        db_path_in("/var/lib/floonet-authority"),
+        "/var/lib/floonet-authority/names.db"
+    );
 }
 
 /// Drive the interactive prompts with canned input over in-memory streams and
@@ -118,7 +137,8 @@ fn collect_answers_uses_input_then_defaults() {
     let input = b"names.example\n\n\noff\nn\n";
     let mut reader = Cursor::new(&input[..]);
     let mut out: Vec<u8> = Vec::new();
-    let a = collect_answers(&mut reader, &mut out).expect("wizard prompts");
+    // hidden = false: secrets are read from the plain stream (no TTY in tests).
+    let a = collect_answers(&mut reader, &mut out, false).expect("wizard prompts");
     assert_eq!(a.domain, "names.example");
     assert_eq!(a.bind_addr, "127.0.0.1:8191");
     assert_eq!(a.data_dir, "/var/lib/floonet-authority");
@@ -137,7 +157,7 @@ fn run_wizard_writes_loadable_env_file() {
 
     let target: PathBuf =
         std::env::temp_dir().join(format!("floonet-setup-test-{}.env", std::process::id()));
-    let written = run_wizard(&mut reader, &mut out, &target).expect("write env file");
+    let written = run_wizard(&mut reader, &mut out, &target, false).expect("write env file");
     assert_eq!(written, target);
 
     let text = std::fs::read_to_string(&target).expect("read back");
@@ -145,12 +165,71 @@ fn run_wizard_writes_loadable_env_file() {
     let get = |k: &str| pairs.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone());
 
     assert_eq!(get("FLOONET_DOMAIN").as_deref(), Some("names.example"));
-    assert_eq!(get("FLOONET_BASE_URL").as_deref(), Some("https://names.example"));
-    assert_eq!(get("FLOONET_RELAYS").as_deref(), Some("wss://names.example"));
+    assert_eq!(
+        get("FLOONET_BASE_URL").as_deref(),
+        Some("https://names.example")
+    );
+    assert_eq!(
+        get("FLOONET_RELAYS").as_deref(),
+        Some("wss://names.example")
+    );
     assert_eq!(get("FLOONET_NAMES_BIND").as_deref(), Some("0.0.0.0:9000"));
-    assert_eq!(get("FLOONET_NAMES_DB").as_deref(), Some("/tmp/floonet-data/names.db"));
+    assert_eq!(
+        get("FLOONET_NAMES_DB").as_deref(),
+        Some("/tmp/floonet-data/names.db")
+    );
 
     let _ = std::fs::remove_file(&target);
+}
+
+/// Paid mode: the GoblinPay token the operator types must NOT land in the env
+/// file. run_wizard writes it to a sibling `0600` secrets file and the env file
+/// only references that path via GOBLINPAY_TOKEN_FILE. This is the secret-
+/// hardening guarantee (no secret in a potentially world-readable env file).
+#[test]
+fn run_wizard_paid_mode_keeps_token_out_of_env_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // domain; bind default; data-dir default; pay=name; price default; gp url
+    // default; token; webhook skipped; transfers no.
+    let input = b"names.example\n\n\nname\n1\n\nsecrettoken123\n\nn\n";
+    let mut reader = Cursor::new(&input[..]);
+    let mut out: Vec<u8> = Vec::new();
+
+    let dir = std::env::temp_dir().join(format!("floonet-secret-test-{}", std::process::id()));
+    let target = dir.join("floonet-authority.env");
+    let written = run_wizard(&mut reader, &mut out, &target, false).expect("write env file");
+    assert_eq!(written, target);
+
+    let env_text = std::fs::read_to_string(&target).expect("read env");
+    // The plaintext token is nowhere in the env file.
+    assert!(
+        !env_text.contains("secrettoken123"),
+        "token must not be in the env file"
+    );
+    assert!(
+        !env_text.contains("GOBLINPAY_TOKEN="),
+        "no inline GOBLINPAY_TOKEN key"
+    );
+    assert!(
+        env_text.contains("GOBLINPAY_TOKEN_FILE="),
+        "env references the token file"
+    );
+
+    // The token lives in a 0600 file and holds exactly the typed value.
+    let token_path = dir
+        .join("floonet-authority")
+        .join("secrets")
+        .join("goblinpay_token");
+    assert!(token_path.is_file(), "token file was written");
+    let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "token file must be 0600");
+    assert_eq!(
+        std::fs::read_to_string(&token_path).unwrap().trim(),
+        "secrettoken123"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// load_env_file is non-overriding: it fills variables that are unset but never
@@ -175,7 +254,11 @@ fn load_env_file_is_non_overriding() {
     let set = load_env_file(&target).expect("load");
     assert_eq!(set, 1, "only the previously unset var should be set");
     assert_eq!(std::env::var(&unset_key).unwrap(), "from_file");
-    assert_eq!(std::env::var(&preset_key).unwrap(), "original", "preset must not be overridden");
+    assert_eq!(
+        std::env::var(&preset_key).unwrap(),
+        "original",
+        "preset must not be overridden"
+    );
 
     let _ = std::fs::remove_file(&target);
     std::env::remove_var(&unset_key);

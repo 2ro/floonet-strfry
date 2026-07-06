@@ -25,6 +25,10 @@ sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 parking_lot = "0.12"
+# Terminal echo toggle for hidden secret entry (the GoblinPay token) in the
+# first-run setup wizard: only tcgetattr/tcsetattr are called, to hide typed
+# secrets so they never echo to the screen or a scrollback buffer.
+libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Blocking HTTP client for the GoblinPay REST calls (wrapped in

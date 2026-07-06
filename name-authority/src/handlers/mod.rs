@@ -29,7 +29,10 @@ pub fn routes(app: Arc<App>) -> Router {
         .route("/api/v1/by-pubkey/{pubkey}", get(profile::by_pubkey))
         .route("/api/v1/paid/{pubkey}", get(paidapi::paid_status))
         .route("/api/v1/quote", post(paidapi::quote))
-        .route("/api/v1/goblinpay/webhook", post(paidapi::goblinpay_webhook))
+        .route(
+            "/api/v1/goblinpay/webhook",
+            post(paidapi::goblinpay_webhook),
+        )
         .route("/api/v1/health", get(misc::health))
         .route("/", get(misc::landing));
 
