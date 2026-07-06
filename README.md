@@ -181,7 +181,17 @@ relay facts, nothing else.
 ## The name authority
 
 Bundled in the package and consulted by the relay plugin; also usable on its
-own. Names are lowercase `a-z0-9._-`, start and end alphanumeric, 3 to 20
+own. The Docker Compose stack runs it alongside the relay by default (the
+`authority` service), and the same `name-authority/` crate builds and runs
+standalone for a systemd or bare-metal deploy. When the authority binary starts
+with nothing configured and an interactive terminal, a first-run setup wizard
+prompts for the essentials (domain, bind address, data dir, pay mode, name
+transfers) and writes an env file; set `FLOONET_DOMAIN` (as Docker Compose and
+the systemd unit both do) and it stays headless. To run a relay with **no** name
+service, drop the `authority` service (and its `/.well-known/nostr.json` +
+`/api/*` proxy routes) from your deploy; the relay itself needs it for nothing.
+
+Names are lowercase `a-z0-9._-`, start and end alphanumeric, 3 to 20
 characters, one active name per pubkey, with a reserved list (generic infra
 and finance terms, your own domain labels, plus look-alike folding so
 `g0blin` cannot impersonate `goblin`) and an anti-churn cooldown after
