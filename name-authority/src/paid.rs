@@ -204,7 +204,14 @@ impl App {
                  invoice_id = excluded.invoice_id, pay_url = excluded.pay_url,
                  amount_nanogrin = excluded.amount_nanogrin, status = 'pending',
                  created_at = excluded.created_at, paid_at = NULL",
-            rusqlite::params![pubkey, resource, inv.id, inv.pay_url, amount as i64, unix_now()],
+            rusqlite::params![
+                pubkey,
+                resource,
+                inv.id,
+                inv.pay_url,
+                amount as i64,
+                unix_now()
+            ],
         );
     }
 
@@ -427,7 +434,10 @@ mod tests {
     #[test]
     fn free_mode_is_always_paid() {
         let app = Arc::new(App::open(Config::for_test()));
-        assert!(matches!(ensure_paid(&app, &"a".repeat(64), "name"), PaidOutcome::Paid));
+        assert!(matches!(
+            ensure_paid(&app, &"a".repeat(64), "name"),
+            PaidOutcome::Paid
+        ));
     }
 
     #[test]
@@ -437,7 +447,12 @@ mod tests {
 
         // First ask: an invoice is created and payment is due.
         let due = ensure_paid(&app, &pk, "name");
-        let PaidOutcome::Due { invoice_id, pay_url, price_nanogrin } = due else {
+        let PaidOutcome::Due {
+            invoice_id,
+            pay_url,
+            price_nanogrin,
+        } = due
+        else {
             panic!("expected Due, got {due:?}");
         };
         assert_eq!(price_nanogrin, 1_500_000_000);
@@ -445,13 +460,18 @@ mod tests {
 
         // Second ask: same invoice (idempotent), still due.
         let again = ensure_paid(&app, &pk, "name");
-        let PaidOutcome::Due { invoice_id: id2, .. } = again else {
+        let PaidOutcome::Due {
+            invoice_id: id2, ..
+        } = again
+        else {
             panic!("expected Due");
         };
         assert_eq!(id2, invoice_id);
 
         // Settle at the backend; the next ask promotes the grant.
-        mock.statuses.lock().insert(invoice_id.clone(), "paid".into());
+        mock.statuses
+            .lock()
+            .insert(invoice_id.clone(), "paid".into());
         assert!(matches!(ensure_paid(&app, &pk, "name"), PaidOutcome::Paid));
         // And it stays paid without further polling.
         assert!(matches!(ensure_paid(&app, &pk, "name"), PaidOutcome::Paid));
@@ -464,8 +484,13 @@ mod tests {
         let PaidOutcome::Due { invoice_id, .. } = ensure_paid(&app, &pk, "name") else {
             panic!("expected Due");
         };
-        mock.statuses.lock().insert(invoice_id.clone(), "expired".into());
-        let PaidOutcome::Due { invoice_id: id2, .. } = ensure_paid(&app, &pk, "name") else {
+        mock.statuses
+            .lock()
+            .insert(invoice_id.clone(), "expired".into());
+        let PaidOutcome::Due {
+            invoice_id: id2, ..
+        } = ensure_paid(&app, &pk, "name")
+        else {
             panic!("expected Due");
         };
         assert_ne!(id2, invoice_id, "a fresh invoice replaces the expired one");
@@ -489,7 +514,10 @@ mod tests {
         app.mark_grant_paid(&invoice_id);
         assert!(matches!(ensure_paid(&app, &pk, "name"), PaidOutcome::Paid));
         app.consume_grant(&pk, "name");
-        assert!(matches!(ensure_paid(&app, &pk, "name"), PaidOutcome::Due { .. }));
+        assert!(matches!(
+            ensure_paid(&app, &pk, "name"),
+            PaidOutcome::Due { .. }
+        ));
     }
 
     #[test]
@@ -502,6 +530,9 @@ mod tests {
         app.mark_grant_paid(&invoice_id);
         assert!(matches!(ensure_paid(&app, &pk, "name"), PaidOutcome::Paid));
         // Paying for a name does not grant write access.
-        assert!(matches!(ensure_paid(&app, &pk, "write"), PaidOutcome::Due { .. }));
+        assert!(matches!(
+            ensure_paid(&app, &pk, "write"),
+            PaidOutcome::Due { .. }
+        ));
     }
 }

@@ -18,7 +18,29 @@ through strfry's own extension points:
 
 ## Deploy
 
-Pick your comfort level. All three paths produce the same relay.
+Pick your comfort level. All paths produce the same relay.
+
+### 0. Guided installer (easiest, Grin-style)
+
+```sh
+sudo ./install.sh
+```
+
+One interactive script. It asks a single topology question - whether to run the
+bundled name service **alongside the relay** (co-located on one domain), on a
+**separate domain**, **relay only**, or the **name authority standalone** - then
+builds what you chose, installs the hardened systemd units, and hands off to the
+name authority's own setup wizard. Every prompt has a sensible default. Any
+secret (the GoblinPay API token) is collected over a **hidden prompt** and
+written to a root-only `0600` file, never the env file; the installer wires it
+to the service as a systemd credential. Re-runnable, and it never clobbers an
+existing config. Prefer this unless you want Docker.
+
+The name authority also runs its wizard on its own: with nothing configured, a
+bare `floonet-name-authority` on a terminal offers it, or run it explicitly with
+`floonet-name-authority setup` (`--reconfigure` to redo an existing config). When
+`FLOONET_DOMAIN` is set (compose/systemd), the wizard never fires - those deploys
+stay fully headless.
 
 ### 1. Docker Compose (recommended)
 
@@ -153,6 +175,11 @@ GOBLINPAY_URL=https://pay.your.domain
 GOBLINPAY_TOKEN=<GP_API_TOKEN from your GoblinPay>
 ```
 
+The token is a secret. The guided installer and the `floonet-name-authority
+setup` wizard collect it over a hidden prompt and store it in a root-only `0600`
+file referenced by `GOBLINPAY_TOKEN_FILE`, so it never lands in the env file;
+set `GOBLINPAY_TOKEN` inline only for a throwaway local test.
+
 Modes:
 
 - `off`: everything free (default).
@@ -181,7 +208,17 @@ relay facts, nothing else.
 ## The name authority
 
 Bundled in the package and consulted by the relay plugin; also usable on its
-own. Names are lowercase `a-z0-9._-`, start and end alphanumeric, 3 to 20
+own. The Docker Compose stack runs it alongside the relay by default (the
+`authority` service), and the same `name-authority/` crate builds and runs
+standalone for a systemd or bare-metal deploy. When the authority binary starts
+with nothing configured and an interactive terminal, a first-run setup wizard
+prompts for the essentials (domain, bind address, data dir, pay mode, name
+transfers) and writes an env file; set `FLOONET_DOMAIN` (as Docker Compose and
+the systemd unit both do) and it stays headless. To run a relay with **no** name
+service, drop the `authority` service (and its `/.well-known/nostr.json` +
+`/api/*` proxy routes) from your deploy; the relay itself needs it for nothing.
+
+Names are lowercase `a-z0-9._-`, start and end alphanumeric, 3 to 20
 characters, one active name per pubkey, with a reserved list (generic infra
 and finance terms, your own domain labels, plus look-alike folding so
 `g0blin` cannot impersonate `goblin`) and an anti-churn cooldown after
@@ -203,6 +240,33 @@ releasing a name.
 NIP-98 requests are verified fully: signature, kind 27235, `u`/`method`/
 `payload` tags against `FLOONET_BASE_URL`, a freshness window, and one-time
 event ids (replay rejection).
+
+### Name transfers (optional, off by default)
+
+Mounted only when `FLOONET_TRANSFERS` is set; otherwise these routes do not
+exist and requests 404. Independent of `FLOONET_PAY_MODE`: the two features
+toggle in any combination.
+
+| Endpoint | Auth | Purpose |
+| --- | --- | --- |
+| `POST /api/v1/transfer/offer` `{offer}` | NIP-98 (seller) | lodge a signed kind-3402 sale offer |
+| `GET /api/v1/transfer/offer/{id}` | none | read an offer + its status (CORS `*`) |
+| `DELETE /api/v1/transfer/offer/{id}` | NIP-98 (seller) | revoke a live offer |
+| `POST /api/v1/transfer/claim` `{offer_id, proof}` | NIP-98 (buyer) | claim the name with a Grin payment proof |
+
+A **name transfer** reassigns an active name from the seller's pubkey to the
+buyer's. It is **strictly non-custodial and has zero GoblinPay involvement**:
+the buyer pays the seller directly, wallet to wallet in Grin, and the authority
+never holds funds. The seller lodges a signed offer (a kind-3402 event binding
+name, buyer pubkey, price, receiving address, and expiry); the buyer pays on
+chain and submits the six-field Grin payment proof; the authority verifies both
+signatures over the canonical 73-byte message, confirms the kernel on chain
+(`FLOONET_TRANSFER_MIN_CONF` deep) via a read-only node foreign API, checks the
+exact amount and receiving address, ensures the kernel excess was never used
+before, and then swaps one database row in a single atomic transaction. Keys
+never move - only the name's pubkey changes. Enabling this needs a reachable
+Grin node foreign API (`FLOONET_GRIN_NODE_URL`). The full protocol is specified
+in the Goblin Name Transfer Protocol v1 spec.
 
 ## Co-locating names on the relay domain
 
@@ -290,9 +354,13 @@ system tor with the snippet in `deploy/tor/torrc` (a `HiddenServiceDir` plus a
 - **Rate limits** per IP on the authority's read and write endpoints,
   NIP-98 replay protection, name-change cooldown, and a poll throttle so
   outsiders cannot hammer GoblinPay through the public paid endpoint.
-- **No secrets in the repo.** The GoblinPay token comes from the environment
-  or a `0400` file via `GOBLINPAY_TOKEN_FILE`; the authority never logs it.
-  The relay itself holds no secrets at all.
+- **No secrets in the repo, and none in world-readable files.** The GoblinPay
+  token is collected by the setup wizard over a hidden prompt and written to a
+  root-only `0600` file that `GOBLINPAY_TOKEN_FILE` names (the systemd unit
+  exposes it to the service as a credential, so the dynamic user reads a copy
+  without the file being broadly readable). It is never written to the env file
+  and never logged. A free authority holds no secret at all, and the relay
+  itself holds none in any mode.
 - `events.maxEventSize` is sized so large gift-wrapped payloads fit.
 
 ## Configuration reference
@@ -312,8 +380,14 @@ essentials:
 | `FLOONET_PAY_MODE` | `off` | `off` / `name` / `write` |
 | `FLOONET_NAME_PRICE_GRIN` | `0` | price of a name, in GRIN |
 | `FLOONET_WRITE_PRICE_GRIN` | `0` | price of write access, in GRIN |
-| `GOBLINPAY_URL` / `GOBLINPAY_TOKEN` | unset | your GoblinPay server |
-| `GOBLINPAY_WEBHOOK_SECRET` | unset | enables the webhook receiver |
+| `GOBLINPAY_URL` | unset | your GoblinPay server base URL |
+| `GOBLINPAY_TOKEN_FILE` / `GOBLINPAY_TOKEN` | unset | API token; prefer the `0600` `_FILE` form the wizard writes over the inline value |
+| `GOBLINPAY_WEBHOOK_SECRET_FILE` / `GOBLINPAY_WEBHOOK_SECRET` | unset | enables the webhook receiver; `_FILE` keeps the secret out of the env file |
+| `FLOONET_TRANSFERS` | `false` | enable the name-transfer routes (off = they 404) |
+| `FLOONET_GRIN_NODE_URL` | unset | Grin node foreign API(s) for payment confirmation (**required** when transfers are on) |
+| `FLOONET_TRANSFER_MIN_CONF` | `10` | confirmations a payment kernel needs before a claim |
+| `FLOONET_TRANSFER_MAX_OFFER_TTL` | `2592000` | longest offer time-to-live in seconds (30 days) |
+| `FLOONET_TRANSFER_CLAIM_GRACE` | `86400` | grace window in seconds for a claim after an offer dies (1 day) |
 | `COMPOSE_PROFILES` | unset | `tor` also runs a Tor onion in front of the relay |
 
 ## Note for Goblin wallet users

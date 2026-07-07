@@ -358,7 +358,11 @@ async fn paid_name_does_not_quote_for_invalid_or_taken_names() {
     let (s2, j2) = send(app.clone(), register_req(&bob, "alice")).await;
     assert_eq!(s2, StatusCode::CONFLICT);
     assert_eq!(j2["error"], "name taken");
-    assert_eq!(mock.created.lock().len(), created_before, "no invoice minted");
+    assert_eq!(
+        mock.created.lock().len(),
+        created_before,
+        "no invoice minted"
+    );
 
     // A reserved name also never mints an invoice.
     let (s3, _) = send(app.clone(), register_req(&bob, "admin")).await;
@@ -388,7 +392,9 @@ async fn paid_status_reflects_write_grants() {
     assert_eq!(mock.created.lock().len(), 0);
 
     // Quote write access (NIP-98) -> 402 with the pay URL.
-    let body = serde_json::json!({"resource": "write"}).to_string().into_bytes();
+    let body = serde_json::json!({"resource": "write"})
+        .to_string()
+        .into_bytes();
     let auth = nip98_header(&keys, "POST", "/api/v1/quote", &body, 0);
     let quote = Request::builder()
         .method("POST")
@@ -418,7 +424,9 @@ async fn paid_status_reflects_write_grants() {
 async fn quote_rejects_resources_not_for_sale() {
     let (app, _mock) = paid_test_app(PayMode::Name);
     let keys = Keys::generate();
-    let body = serde_json::json!({"resource": "write"}).to_string().into_bytes();
+    let body = serde_json::json!({"resource": "write"})
+        .to_string()
+        .into_bytes();
     let auth = nip98_header(&keys, "POST", "/api/v1/quote", &body, 0);
     let req = Request::builder()
         .method("POST")
@@ -456,7 +464,9 @@ async fn goblinpay_webhook_nudges_grant_to_paid() {
     let pk = keys.public_key().to_hex();
 
     // Create a pending write grant via quote.
-    let body = serde_json::json!({"resource": "write"}).to_string().into_bytes();
+    let body = serde_json::json!({"resource": "write"})
+        .to_string()
+        .into_bytes();
     let auth = nip98_header(&keys, "POST", "/api/v1/quote", &body, 0);
     let quote = Request::builder()
         .method("POST")
@@ -470,7 +480,9 @@ async fn goblinpay_webhook_nudges_grant_to_paid() {
     let invoice_id = j["invoice_id"].as_str().unwrap().to_string();
 
     // Settle at the backend, then deliver the signed webhook nudge.
-    mock.statuses.lock().insert(invoice_id.clone(), "paid".into());
+    mock.statuses
+        .lock()
+        .insert(invoice_id.clone(), "paid".into());
     let payload = serde_json::json!({
         "event_id": "evt-1",
         "event_type": "payment.confirmed",
@@ -511,7 +523,9 @@ async fn webhook_alone_cannot_grant_unpaid_invoice() {
     let keys = Keys::generate();
     let pk = keys.public_key().to_hex();
 
-    let body = serde_json::json!({"resource": "write"}).to_string().into_bytes();
+    let body = serde_json::json!({"resource": "write"})
+        .to_string()
+        .into_bytes();
     let auth = nip98_header(&keys, "POST", "/api/v1/quote", &body, 0);
     let quote = Request::builder()
         .method("POST")

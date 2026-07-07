@@ -65,6 +65,15 @@ services:
       GOBLINPAY_URL: ${GOBLINPAY_URL:-}
       GOBLINPAY_TOKEN: ${GOBLINPAY_TOKEN:-}
       GOBLINPAY_WEBHOOK_SECRET: ${GOBLINPAY_WEBHOOK_SECRET:-}
+      # Name transfers (the name marketplace; off by default, strictly
+      # non-custodial, no GoblinPay involvement). Independent of the pay mode.
+      # When on, FLOONET_GRIN_NODE_URL is REQUIRED (get_kernel/get_tip). See
+      # .env.example and docs-notes/name-transfer-spec.md.
+      FLOONET_TRANSFERS: ${FLOONET_TRANSFERS:-false}
+      FLOONET_GRIN_NODE_URL: ${FLOONET_GRIN_NODE_URL:-}
+      FLOONET_TRANSFER_MIN_CONF: ${FLOONET_TRANSFER_MIN_CONF:-10}
+      FLOONET_TRANSFER_MAX_OFFER_TTL: ${FLOONET_TRANSFER_MAX_OFFER_TTL:-2592000}
+      FLOONET_TRANSFER_CLAIM_GRACE: ${FLOONET_TRANSFER_CLAIM_GRACE:-86400}
     volumes:
       - authority-data:/data
     expose:
