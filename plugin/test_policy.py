@@ -32,11 +32,16 @@ PK_NPUB = "npub1424242424242424242424242424242424242424242424242424qamrcaj"
 OTHER_PK = "b" * 64
 
 
-def req(kind, authed=None, event_id="e1", pubkey=PK):
-    """A request shaped exactly like strfry's plugin input."""
+def req(kind, authed=None, event_id="e1", pubkey=PK, tags=None):
+    """A request shaped exactly like strfry's plugin input. Kind 1059 (gift
+    wrap) defaults to a single well-formed `p` tag so existing tests that
+    only care about other checks keep passing the gift-wrap shape guard;
+    pass tags=[...] explicitly to exercise that guard itself."""
+    if tags is None:
+        tags = [["p", OTHER_PK]] if kind == 1059 else []
     r = {
         "type": "new",
-        "event": {"id": event_id, "pubkey": pubkey, "kind": kind, "tags": [], "content": ""},
+        "event": {"id": event_id, "pubkey": pubkey, "kind": kind, "tags": tags, "content": ""},
         "receivedAt": 1700000000,
         "sourceType": "IP4",
         "sourceInfo": "203.0.113.7",
@@ -258,6 +263,55 @@ class PublicNoteLock(unittest.TestCase):
             env={"FLOONET_AUTHORIZED_AUTHORS": " %s , %s " % (PK_NPUB, OTHER_PK)}
         )
         self.assertEqual(c["authorized_authors"], {PK, OTHER_PK})
+
+
+class GiftWrapRetention(unittest.TestCase):
+    """Kind 1059 (gift wrap) retention/shape guard: no NIP-40 expiration tag
+    (strfry's only automatic deletion trigger), exactly one well-formed `p`
+    recipient tag. Every other kind is unaffected."""
+
+    def test_expiration_tag_rejected(self):
+        r = req(1059, tags=[["p", OTHER_PK], ["expiration", "1700000100"]])
+        reply = wp.decide(r, cfg())
+        self.assertEqual(reply["action"], "reject")
+        self.assertIn("expiration not allowed", reply["msg"])
+
+    def test_no_p_tag_rejected(self):
+        reply = wp.decide(req(1059, tags=[]), cfg())
+        self.assertEqual(reply["action"], "reject")
+        self.assertIn("missing recipient", reply["msg"])
+
+    def test_multiple_p_tags_rejected(self):
+        r = req(1059, tags=[["p", OTHER_PK], ["p", PK]])
+        reply = wp.decide(r, cfg())
+        self.assertEqual(reply["action"], "reject")
+        self.assertIn("missing recipient", reply["msg"])
+
+    def test_malformed_p_tag_rejected(self):
+        for bad in ("short", "z" * 64, "", None):
+            r = req(1059, tags=[["p", bad]])
+            reply = wp.decide(r, cfg())
+            self.assertEqual(reply["action"], "reject", repr(bad))
+            self.assertIn("missing recipient", reply["msg"])
+
+    def test_valid_giftwrap_accepted(self):
+        r = req(1059, tags=[["p", OTHER_PK]])
+        self.assertEqual(wp.decide(r, cfg())["action"], "accept")
+
+    def test_non_giftwrap_with_expiration_unaffected(self):
+        # Expiration tags are fine on every other kind; only 1059 is guarded.
+        r = req(1, tags=[["expiration", "1700000100"]])
+        reply = wp.decide(r, cfg(authorized_authors={PK}))
+        self.assertEqual(reply["action"], "accept")
+
+    def test_giftwrap_guard_runs_before_paid_gate(self):
+        # Malformed gift-wrap shape is caught even when the paid gate would
+        # otherwise reject/accept on auth; shape check must run first.
+        c = cfg(pay_mode="write")
+        r = req(1059, authed=PK, tags=[["expiration", "1700000100"], ["p", OTHER_PK]])
+        reply = wp.decide(r, c)
+        self.assertEqual(reply["action"], "reject")
+        self.assertIn("expiration not allowed", reply["msg"])
 
 
 class EnvFileConfig(unittest.TestCase):

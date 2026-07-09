@@ -15,6 +15,12 @@ event rather than letting it through.
                         are accepted only from FLOONET_AUTHORIZED_AUTHORS;
                         closed by default (no authors = these kinds rejected
                         for everyone). Every other kind is unaffected.
+    1c. gift wrap retention/shape (kind 1059 only) rejects a NIP-40
+                        `expiration` tag, so strfry's ~9s reaper can never
+                        early-delete a payment gift wrap, and requires
+                        exactly one well-formed `p` tag (32-byte hex
+                        recipient) so a malformed gift wrap cannot slip
+                        through. Every other kind is unaffected.
     2. auth requirement optional; with FLOONET_REQUIRE_AUTH=true an event is
                         rejected unless the connection completed NIP-42 AUTH
                         (also enable relay.auth in strfry.conf)
@@ -339,7 +345,59 @@ def check_paid(req, cfg, now=time.monotonic):
     return None
 
 
-CHECKS = [check_kind, check_authorized_authors, check_auth, check_paid]
+def check_giftwrap_expiration(req, cfg):
+    """Gift-wrap retention guard (kind 1059 only): the only automatic
+    deletion trigger strfry has is a NIP-40 `expiration` tag, reaped every
+    ~9s. A gift-wrapped payment must never carry one, so reject at admission
+    rather than trust the publishing client. Every other kind is
+    unaffected."""
+    event = req.get("event", {})
+    if event.get("kind") != 1059:
+        return None
+    tags = event.get("tags")
+    if not isinstance(tags, list):
+        return "blocked: malformed event tags"
+    for tag in tags:
+        if isinstance(tag, list) and tag and tag[0] == "expiration":
+            return "blocked: expiration not allowed on gift wraps"
+    return None
+
+
+def check_giftwrap_recipient(req, cfg):
+    """Gift-wrap shape guard (kind 1059 only): a NIP-59 gift wrap carries its
+    recipient in a single `p` tag. Reject a gift wrap with zero, more than
+    one, or a malformed (non 32-byte-hex) `p` tag rather than relay junk the
+    recipient's client cannot route. Every other kind is unaffected."""
+    event = req.get("event", {})
+    if event.get("kind") != 1059:
+        return None
+    tags = event.get("tags")
+    if not isinstance(tags, list):
+        return "blocked: malformed event tags"
+    p_pubkeys = [
+        tag[1] for tag in tags
+        if isinstance(tag, list) and len(tag) >= 2 and tag[0] == "p"
+    ]
+    if len(p_pubkeys) != 1:
+        return "blocked: gift wrap missing recipient"
+    pubkey = p_pubkeys[0]
+    if not isinstance(pubkey, str) or len(pubkey) != 64:
+        return "blocked: gift wrap missing recipient"
+    try:
+        int(pubkey, 16)
+    except ValueError:
+        return "blocked: gift wrap missing recipient"
+    return None
+
+
+CHECKS = [
+    check_kind,
+    check_giftwrap_expiration,
+    check_giftwrap_recipient,
+    check_authorized_authors,
+    check_auth,
+    check_paid,
+]
 
 
 def decide(req, cfg):
