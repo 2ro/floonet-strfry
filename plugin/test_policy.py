@@ -313,6 +313,56 @@ class GiftWrapRetention(unittest.TestCase):
         self.assertEqual(reply["action"], "reject")
         self.assertIn("expiration not allowed", reply["msg"])
 
+    def test_uppercase_p_tag_rejected(self):
+        # The recipient-only READ gate compares `#p` to the authed pubkey as
+        # a case-sensitive lowercase string; an uppercase `p` would parse as
+        # hex but never match, orphaning the payment forever. Reject it here.
+        r = req(1059, tags=[["p", OTHER_PK.upper()]])
+        reply = wp.decide(r, cfg())
+        self.assertEqual(reply["action"], "reject")
+        self.assertIn("missing recipient", reply["msg"])
+
+    def test_mixed_case_p_tag_rejected(self):
+        mixed = "B" + OTHER_PK[1:]
+        r = req(1059, tags=[["p", mixed]])
+        reply = wp.decide(r, cfg())
+        self.assertEqual(reply["action"], "reject")
+        self.assertIn("missing recipient", reply["msg"])
+
+    def test_valid_lowercase_p_tag_accepted(self):
+        r = req(1059, tags=[["p", OTHER_PK]])
+        self.assertEqual(wp.decide(r, cfg())["action"], "accept")
+
+    def test_minimal_valid_wrap_accepted(self):
+        # A spec-accurate NIP-59 gift wrap: exactly one tag, the `p`
+        # recipient, lowercase hex, nothing else.
+        r = req(1059, tags=[["p", OTHER_PK]])
+        reply = wp.decide(r, cfg())
+        self.assertEqual(reply["action"], "accept")
+
+    def test_extraneous_tags_rejected(self):
+        # A well-formed `p` tag plus unrelated junk tags: reject as bloat
+        # rather than let a 128 KiB event carry thousands of extra tags.
+        r = req(1059, tags=[["p", OTHER_PK], ["junk", "1"], ["e", PK]])
+        reply = wp.decide(r, cfg())
+        self.assertEqual(reply["action"], "reject")
+        self.assertIn("extraneous tags", reply["msg"])
+
+    def test_many_extraneous_tags_rejected(self):
+        # A pathological case: one valid `p` tag buried under a pile of
+        # junk tags, well under the 128 KiB event-size ceiling.
+        tags = [["p", OTHER_PK]] + [["junk", str(i)] for i in range(2000)]
+        reply = wp.decide(req(1059, tags=tags), cfg())
+        self.assertEqual(reply["action"], "reject")
+        self.assertIn("extraneous tags", reply["msg"])
+
+    def test_non_giftwrap_with_many_tags_unaffected(self):
+        # The tag ceiling is 1059-only; other kinds are free to carry as
+        # many tags as they like.
+        tags = [["t", str(i)] for i in range(50)]
+        reply = wp.decide(req(1, tags=tags), cfg(authorized_authors={PK}))
+        self.assertEqual(reply["action"], "accept")
+
 
 class EnvFileConfig(unittest.TestCase):
     """load_config also reads a KEY=VALUE file, with real env taking priority."""

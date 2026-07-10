@@ -17,10 +17,18 @@ event rather than letting it through.
                         for everyone). Every other kind is unaffected.
     1c. gift wrap retention/shape (kind 1059 only) rejects a NIP-40
                         `expiration` tag, so strfry's ~9s reaper can never
-                        early-delete a payment gift wrap, and requires
-                        exactly one well-formed `p` tag (32-byte hex
-                        recipient) so a malformed gift wrap cannot slip
-                        through. Every other kind is unaffected.
+                        early-delete a payment gift wrap; requires exactly
+                        one well-formed `p` tag matching strict lowercase
+                        hex (^[0-9a-f]{64}$) since the recipient-only read
+                        gate compares `#p` to the authed pubkey as a
+                        case-sensitive lowercase string, and an
+                        uppercase/mixed-case `p` would otherwise be a
+                        permanently undeliverable payment; and rejects any
+                        tag other than that single `p` tag, so a well-formed
+                        1059 (which legitimately carries just the one tag)
+                        cannot be padded with thousands of junk tags up to
+                        the 128 KiB event ceiling. Every other kind is
+                        unaffected.
     2. auth requirement optional; with FLOONET_REQUIRE_AUTH=true an event is
                         rejected unless the connection completed NIP-42 AUTH
                         (also enable relay.auth in strfry.conf)
@@ -107,6 +115,7 @@ own executable.
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -127,6 +136,13 @@ _DEFAULT_ENV_FILE = os.path.join(
 )
 
 _BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+# Strict lowercase-only 32-byte hex, used for the gift-wrap `p` tag. The
+# recipient-only READ gate compares `#p` to the authed pubkey as a
+# case-sensitive lowercase string, so an uppercase/mixed-case hex value that
+# still parses with int(x, 16) would slip past a looser check and become a
+# permanently undeliverable payment. Anchored both ends: no partial match.
+_HEX64_LOWER_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _bech32_polymod(values):
@@ -366,8 +382,13 @@ def check_giftwrap_expiration(req, cfg):
 def check_giftwrap_recipient(req, cfg):
     """Gift-wrap shape guard (kind 1059 only): a NIP-59 gift wrap carries its
     recipient in a single `p` tag. Reject a gift wrap with zero, more than
-    one, or a malformed (non 32-byte-hex) `p` tag rather than relay junk the
-    recipient's client cannot route. Every other kind is unaffected."""
+    one, or a malformed `p` tag rather than relay junk the recipient's
+    client cannot route. The hex value must be strict lowercase
+    (^[0-9a-f]{64}$): the recipient-only READ gate compares `#p` to the
+    authed pubkey as a case-sensitive lowercase string, so an
+    uppercase/mixed-case value that still parses as hex would otherwise pass
+    admission and become a permanently undeliverable payment. Every other
+    kind is unaffected."""
     event = req.get("event", {})
     if event.get("kind") != 1059:
         return None
@@ -381,12 +402,29 @@ def check_giftwrap_recipient(req, cfg):
     if len(p_pubkeys) != 1:
         return "blocked: gift wrap missing recipient"
     pubkey = p_pubkeys[0]
-    if not isinstance(pubkey, str) or len(pubkey) != 64:
+    if not isinstance(pubkey, str) or not _HEX64_LOWER_RE.match(pubkey):
         return "blocked: gift wrap missing recipient"
-    try:
-        int(pubkey, 16)
-    except ValueError:
-        return "blocked: gift wrap missing recipient"
+    return None
+
+
+def check_giftwrap_tags(req, cfg):
+    """Gift-wrap anti-bloat guard (kind 1059 only): a well-formed NIP-59 gift
+    wrap legitimately carries exactly one tag, the single `p` recipient.
+    Reject a gift wrap that carries any other tag at all, rather than let a
+    relay-sized (up to 128 KiB) event smuggle thousands of junk tags past
+    admission alongside one valid `p` tag. This is stricter than, and runs
+    after, check_giftwrap_expiration/check_giftwrap_recipient so their more
+    specific rejection reasons still fire first for those particular
+    malformed shapes. Every other kind is unaffected."""
+    event = req.get("event", {})
+    if event.get("kind") != 1059:
+        return None
+    tags = event.get("tags")
+    if not isinstance(tags, list):
+        return "blocked: malformed event tags"
+    for tag in tags:
+        if not (isinstance(tag, list) and tag and tag[0] == "p"):
+            return "blocked: gift wrap has extraneous tags"
     return None
 
 
@@ -394,6 +432,7 @@ CHECKS = [
     check_kind,
     check_giftwrap_expiration,
     check_giftwrap_recipient,
+    check_giftwrap_tags,
     check_authorized_authors,
     check_auth,
     check_paid,
