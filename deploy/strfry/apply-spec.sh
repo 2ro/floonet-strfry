@@ -16,7 +16,7 @@ set -eu
 
 STRFRY_REPO="https://github.com/hoytech/strfry"
 # Pinned for reproducibility. Keep in sync with the Dockerfile's STRFRY_REF.
-STRFRY_REF="f8a56a85967630a115e3c4367db42d228d7bedf3"
+STRFRY_REF="4cd3cf64850caf47dda46c2a2abbbf3525a64d10"
 
 SPEC_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_DIR="$(cd "$SPEC_DIR/../../plugin" && pwd)"

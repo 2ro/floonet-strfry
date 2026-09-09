@@ -13,7 +13,7 @@ WORKDIR /build
 RUN apk --no-cache add \
         linux-headers git g++ make perl pkgconfig libtool ca-certificates \
         libressl-dev zlib-dev lmdb-dev flatbuffers-dev libsecp256k1-dev zstd-dev
-ARG STRFRY_REF=f8a56a85967630a115e3c4367db42d228d7bedf3
+ARG STRFRY_REF=4cd3cf64850caf47dda46c2a2abbbf3525a64d10
 RUN git clone https://github.com/hoytech/strfry . \
     && git checkout "${STRFRY_REF}" \
     && git submodule update --init \
