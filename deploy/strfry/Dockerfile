@@ -7,7 +7,7 @@
 #
 # Pinned for reproducibility. Bump STRFRY_REF to a newer upstream commit to
 # update strfry; nothing else changes, since the source is never touched.
-FROM alpine:3.18 AS build
+FROM alpine:3.24 AS build
 ENV TZ=Europe/London
 WORKDIR /build
 RUN apk --no-cache add \
@@ -20,13 +20,13 @@ RUN git clone https://github.com/hoytech/strfry . \
     && make setup-golpe \
     && make -j"$(nproc)"
 
-FROM alpine:3.18
+FROM alpine:3.24
 WORKDIR /app
 # PYTHONUNBUFFERED keeps the write policy plugin's stdio prompt; it also
 # flushes explicitly, so this is belt-and-suspenders against buffering stalls.
 ENV PYTHONUNBUFFERED=1
 RUN apk --no-cache add \
-        lmdb flatbuffers libsecp256k1 libb2 zstd libressl python3 \
+        lmdb flatbuffers libsecp256k1 libb2 zstd libressl4.3-libssl libressl4.3-libcrypto python3 \
     && rm -rf /var/cache/apk/*
 COPY --from=build /build/strfry /app/strfry
 COPY plugin/floonet_writepolicy.py /usr/local/bin/floonet_writepolicy.py
