@@ -36,6 +36,9 @@ AUTH_DROPIN_DIR=/etc/systemd/system/floonet-authority.service.d
 RELAY_BIN=/usr/local/bin/strfry
 RELAY_PLUGIN=/usr/local/bin/floonet_writepolicy.py
 RELAY_CONF_DIR=/etc/floonet-strfry
+RELAY_ENV=/etc/floonet-strfry.env
+# The systemd unit's StateDirectory: the only path the sandboxed relay may write.
+RELAY_STATE_DIR=/var/lib/floonet-strfry
 RELAY_UNIT=/etc/systemd/system/floonet-strfry.service
 
 say()  { printf '\033[1;33m==>\033[0m %s\n' "$1"; }
@@ -169,7 +172,35 @@ if [[ "$INSTALL_RELAY" == yes ]]; then
 		say "Installing the write-policy plugin to $RELAY_PLUGIN"
 		$SUDO install -m0755 "$REPO_DIR/plugin/floonet_writepolicy.py" "$RELAY_PLUGIN"
 		say "Installing the relay config to $RELAY_CONF_DIR/strfry.conf"
-		$SUDO install -m0644 -D "$REPO_DIR/deploy/strfry/strfry.conf" "$RELAY_CONF_DIR/strfry.conf"
+		# The shipped conf keeps the db at the container path /strfry-db/. The
+		# unit runs with ProtectSystem=strict and may write only its
+		# StateDirectory, so installed verbatim the relay could never open its
+		# database. Point the installed copy at the StateDirectory.
+		relay_conf_tmp="$(mktemp)"
+		sed 's#^db = .*#db = "'"$RELAY_STATE_DIR"'/"#' \
+			"$REPO_DIR/deploy/strfry/strfry.conf" > "$relay_conf_tmp"
+		if ! grep -q '^db = "'"$RELAY_STATE_DIR"'/"$' "$relay_conf_tmp"; then
+			rm -f "$relay_conf_tmp"
+			warn "Could not set the db path in strfry.conf; not installing the relay config."
+			exit 1
+		fi
+		# A re-run replaces the conf (new strfry refs can need new settings), so
+		# keep the previous one if the operator had changed it.
+		if $SUDO test -f "$RELAY_CONF_DIR/strfry.conf" \
+			&& ! $SUDO cmp -s "$relay_conf_tmp" "$RELAY_CONF_DIR/strfry.conf"; then
+			relay_conf_bak="$RELAY_CONF_DIR/strfry.conf.bak.$(date +%Y%m%d%H%M%S)"
+			say "Existing relay config differs; saving it as $relay_conf_bak"
+			$SUDO cp -p "$RELAY_CONF_DIR/strfry.conf" "$relay_conf_bak"
+		fi
+		$SUDO install -m0644 -D "$relay_conf_tmp" "$RELAY_CONF_DIR/strfry.conf"
+		rm -f "$relay_conf_tmp"
+		# The unit's EnvironmentFile is mandatory: without the file systemd
+		# refuses to start the relay. Create an empty one (plugin defaults
+		# apply) and never touch an existing one.
+		if ! $SUDO test -e "$RELAY_ENV"; then
+			say "Creating an empty $RELAY_ENV (plugin defaults; see .env.example)"
+			$SUDO install -m0640 /dev/null "$RELAY_ENV"
+		fi
 		say "Installing the systemd unit to $RELAY_UNIT"
 		$SUDO install -m0644 "$REPO_DIR/deploy/systemd/floonet-strfry.service" "$RELAY_UNIT"
 	fi

@@ -19,7 +19,7 @@ event rather than letting it through.
                         `expiration` tag, so strfry's ~9s reaper can never
                         early-delete a payment gift wrap; requires exactly
                         one well-formed `p` tag matching strict lowercase
-                        hex (^[0-9a-f]{64}$) since the recipient-only read
+                        hex (exactly 64 chars) since the recipient-only read
                         gate compares `#p` to the authed pubkey as a
                         case-sensitive lowercase string, and an
                         uppercase/mixed-case `p` would otherwise be a
@@ -75,6 +75,7 @@ Magick Market marketplace kinds (also reuses 0/5/1059/10002 above):
     30406  shipping option (Gamma spec)
     31990  handler information (NIP-89)
     24133  NIP-46 remote signing (Nostr Connect, ephemeral — Goblin wallet login)
+    24140  Authorize Sessions session channel (Sign in with Goblin)
 
 Excluded on purpose: 25910 (ContextVM) only ever rides inside a 1059 gift
 wrap, never raw; 30017/30018 (legacy NIP-15) are read from sellers' own relays
@@ -114,6 +115,7 @@ own executable.
 """
 
 import json
+import math
 import os
 import re
 import sys
@@ -142,7 +144,9 @@ _BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 # case-sensitive lowercase string, so an uppercase/mixed-case hex value that
 # still parses with int(x, 16) would slip past a looser check and become a
 # permanently undeliverable payment. Anchored both ends: no partial match.
-_HEX64_LOWER_RE = re.compile(r"^[0-9a-f]{64}$")
+# \Z rather than $: in Python `$` also matches just before a trailing "\n",
+# so "^...$" would admit a 65-character value ending in a newline.
+_HEX64_LOWER_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 
 
 def _bech32_polymod(values):
@@ -263,6 +267,20 @@ def load_config(env=os.environ):
             sys.stderr.flush()
             continue
         authorized_authors.add(hex_pubkey)
+    cache_raw = env.get("FLOONET_PAID_CACHE_SECS", "60")
+    try:
+        paid_cache_secs = float(cache_raw)
+    except ValueError:
+        paid_cache_secs = -1.0
+    # float() also parses "nan", "inf" and negatives. A NaN TTL silently
+    # disables the cache (one blocking authority lookup per event) and an
+    # infinite one never re-checks a revoked grant, so refuse them at startup
+    # like the other malformed values.
+    if not (math.isfinite(paid_cache_secs) and paid_cache_secs >= 0.0):
+        raise SystemExit(
+            "floonet-writepolicy: FLOONET_PAID_CACHE_SECS must be a finite, "
+            "non-negative number of seconds, got %r" % cache_raw
+        )
     return {
         "allowed_kinds": allowed,
         "authorized_authors": authorized_authors,
@@ -272,7 +290,7 @@ def load_config(env=os.environ):
         "authority_url": env.get(
             "FLOONET_AUTHORITY_URL", "http://authority:8191"
         ).rstrip("/"),
-        "paid_cache_secs": float(env.get("FLOONET_PAID_CACHE_SECS", "60")),
+        "paid_cache_secs": paid_cache_secs,
     }
 
 
@@ -321,6 +339,26 @@ def check_auth(req, cfg):
 # paid-status cache: pubkey -> (paid: bool, expires_at: float)
 _paid_cache = {}
 
+# Hard cap on cached verdicts. Every distinct AUTHed pubkey adds an entry and
+# keys are free to mint, so without a cap a client cycling through keys grows
+# this dict for the life of the process. Evicting only costs a fresh lookup.
+_PAID_CACHE_MAX = 10000
+
+# The authority's verdict is a ~100 byte JSON object; never read more.
+_PAID_BODY_MAX = 65536
+
+
+def _paid_cache_store(pubkey, paid, expires_at, t):
+    """Insert a verdict, keeping the cache at or under _PAID_CACHE_MAX: drop
+    expired entries first, then the oldest-inserted ones."""
+    _paid_cache.pop(pubkey, None)  # re-insert at the end (newest)
+    if len(_paid_cache) >= _PAID_CACHE_MAX:
+        for key in [k for k, v in _paid_cache.items() if v[1] <= t]:
+            del _paid_cache[key]
+        while len(_paid_cache) >= _PAID_CACHE_MAX:
+            del _paid_cache[next(iter(_paid_cache))]
+    _paid_cache[pubkey] = (paid, expires_at)
+
 
 def _paid_lookup(cfg, pubkey):
     """Ask the bundled name authority whether this pubkey holds a confirmed
@@ -328,8 +366,13 @@ def _paid_lookup(cfg, pubkey):
     only reads the verdict. Raises on any transport/parse problem."""
     url = "%s/api/v1/paid/%s" % (cfg["authority_url"], pubkey)
     with urllib.request.urlopen(url, timeout=3) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-    return bool(body.get("paid"))
+        raw = resp.read(_PAID_BODY_MAX + 1)
+    if len(raw) > _PAID_BODY_MAX:
+        raise ValueError("oversized paid-status response")
+    body = json.loads(raw.decode("utf-8"))
+    # Only a literal JSON `true` is a grant. bool() would also accept
+    # "false", "no", 1, or any other truthy junk as paid.
+    return body.get("paid") is True
 
 
 def check_paid(req, cfg, now=time.monotonic):
@@ -340,7 +383,9 @@ def check_paid(req, cfg, now=time.monotonic):
     if cfg["pay_mode"] != "write":
         return None
     authed = req.get("authed")
-    if not isinstance(authed, str) or len(authed) != 64:
+    # strfry reports the authed pubkey as lowercase hex. Require exactly that:
+    # the value is interpolated into the authority URL below.
+    if not isinstance(authed, str) or not _HEX64_LOWER_RE.match(authed):
         return "auth-required: paid publishing needs NIP-42 AUTH"
     cached = _paid_cache.get(authed)
     t = now()
@@ -349,12 +394,14 @@ def check_paid(req, cfg, now=time.monotonic):
     else:
         try:
             paid = _paid_lookup(cfg, authed)
-            _paid_cache[authed] = (paid, t + cfg["paid_cache_secs"])
+            _paid_cache_store(authed, paid, t + cfg["paid_cache_secs"], t)
         except Exception as e:
             sys.stderr.write("floonet-writepolicy: paid lookup failed: %s\n" % e)
             sys.stderr.flush()
             # Negative-cache briefly, then fail closed.
-            _paid_cache[authed] = (False, t + min(cfg["paid_cache_secs"], 10.0))
+            _paid_cache_store(
+                authed, False, t + min(cfg["paid_cache_secs"], 10.0), t
+            )
             return "blocked: payment status unavailable"
     if not paid:
         return "blocked: payment required to publish on this relay"
@@ -422,6 +469,11 @@ def check_giftwrap_tags(req, cfg):
     tags = event.get("tags")
     if not isinstance(tags, list):
         return "blocked: malformed event tags"
+    # Exactly one tag. Counting matters: check_giftwrap_recipient only counts
+    # `p` tags that carry a value, so without this a wrap could ride one
+    # valid `p` tag alongside thousands of bare ["p"] tags.
+    if len(tags) != 1:
+        return "blocked: gift wrap has extraneous tags"
     for tag in tags:
         if not (isinstance(tag, list) and tag and tag[0] == "p"):
             return "blocked: gift wrap has extraneous tags"
@@ -479,14 +531,20 @@ def main():
     # Use readline() in a loop rather than iterating stdin: the protocol is
     # synchronous (strfry blocks waiting for each reply), so the iterator's
     # read-ahead buffer must never stall the exchange. Flush every reply.
+    # Read raw bytes and decode inside the try: with a strict text-mode stdin
+    # (any non-C UTF-8 locale) a single invalid UTF-8 byte would raise from
+    # readline() itself, outside the handler, and kill the plugin.
+    stdin = getattr(sys.stdin, "buffer", sys.stdin)
     while True:
-        line = sys.stdin.readline()
+        line = stdin.readline()
         if not line:
             break  # strfry closed stdin (shutdown/restart); exit cleanly.
         line = line.strip()
         if not line:
             continue
         try:
+            if isinstance(line, bytes):
+                line = line.decode("utf-8")
             reply = decide(json.loads(line), cfg)
         except Exception as e:
             # A malformed request must never crash the loop and take the

@@ -102,6 +102,7 @@ use:
 | 10002 | relay list (NIP-65) |
 | 10050 | DM relays (NIP-17) |
 | 24133 | Nostr Connect / remote signing (NIP-46) |
+| 24140 | Authorize Sessions session channel |
 | 27235 | HTTP auth (NIP-98) |
 | 30000 / 30003 | people set / bookmark set (NIP-51) |
 | 30023 | long-form article (NIP-23, **author-locked**, see below) |
