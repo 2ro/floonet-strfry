@@ -26,6 +26,10 @@ echo ">> Cloning stock strfry into $TARGET"
 if [ ! -d "$TARGET/.git" ]; then
     git clone "$STRFRY_REPO" "$TARGET"
 fi
+# Make the target absolute before cd'ing into it: every later use ($TARGET/
+# strfry.conf, the db and plugin paths written into the conf) would otherwise
+# resolve a relative target-dir argument against the build dir itself.
+TARGET="$(cd "$TARGET" && pwd)"
 cd "$TARGET"
 git fetch origin
 git checkout "$STRFRY_REF"

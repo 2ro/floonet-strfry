@@ -18,14 +18,20 @@
 #
 # Usage:
 #   ./purge_public_notes.sh --container <name> --keep <hexpubkey>[,<hexpubkey>...]
-#                           [--keep-file <path>] [--chunk N] [--execute]
+#                           [--keep-file <path>] [--chunk N] [--strfry-bin <path>]
+#                           [--execute]
 #
 #   --container   the strfry container name (required)
 #   --keep        comma-separated hex pubkeys to PRESERVE (the authorized
-#                 authors). npubs are NOT accepted here; convert first.
+#                 authors). npubs are NOT accepted here; convert first. Any
+#                 entry that is not 64-char hex aborts the run, so a typo can
+#                 never silently drop an author from the keep-list.
 #   --keep-file   optional file with one hex pubkey per line (# comments ok),
 #                 merged with --keep
 #   --chunk       ids per delete call (default 500)
+#   --strfry-bin  path of the strfry binary INSIDE the container (default
+#                 /app/strfry, where this repo's image puts it; it is not on
+#                 the container's PATH)
 #   --execute     actually delete (otherwise dry run)
 #
 # NOTE on reclaiming space: deletes mark records free but do not shrink the
@@ -41,6 +47,7 @@ KEEP_CSV=""
 KEEP_FILE=""
 CHUNK=500
 EXECUTE=0
+STRFRY_BIN=/app/strfry
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -48,6 +55,7 @@ while [ $# -gt 0 ]; do
         --keep)      KEEP_CSV="$2"; shift 2 ;;
         --keep-file) KEEP_FILE="$2"; shift 2 ;;
         --chunk)     CHUNK="$2"; shift 2 ;;
+        --strfry-bin) STRFRY_BIN="$2"; shift 2 ;;
         --execute)   EXECUTE=1; shift ;;
         --dry-run)   EXECUTE=0; shift ;;
         -h|--help)   grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -56,24 +64,36 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$CONTAINER" ] || { echo "error: --container is required" >&2; exit 2; }
+case "$CHUNK" in
+    ''|*[!0-9]*|0*) echo "error: --chunk must be a positive integer" >&2; exit 2 ;;
+esac
+command -v jq >/dev/null 2>&1 || { echo "error: jq is required on the host" >&2; exit 2; }
 
 # Build the keep-list (one hex pubkey per line) from --keep and --keep-file.
 KEEP_LIST="$(mktemp)"
 RAW_FILE="$(mktemp)"
 IDS_FILE="$(mktemp)"
 CHUNKS_FILE="$(mktemp)"
-trap 'rm -f "$KEEP_LIST" "$RAW_FILE" "$IDS_FILE" "$CHUNKS_FILE" 2>/dev/null || true' EXIT
+trap 'rm -f "$KEEP_LIST" "$RAW_FILE" "$IDS_FILE" "$IDS_FILE.raw" "$CHUNKS_FILE" 2>/dev/null || true' EXIT
 if [ -n "$KEEP_CSV" ]; then
     printf '%s\n' "$KEEP_CSV" | tr ',' '\n'
 fi >> "$KEEP_LIST"
 if [ -n "$KEEP_FILE" ]; then
-    grep -v '^[[:space:]]*#' "$KEEP_FILE" 2>/dev/null || true
+    [ -r "$KEEP_FILE" ] || { echo "error: cannot read --keep-file $KEEP_FILE" >&2; exit 2; }
+    grep -v '^[[:space:]]*#' "$KEEP_FILE" || true
 fi >> "$KEEP_LIST"
-# Normalise: trim, lowercase, drop blanks, keep only 64-char hex, de-dup.
+# Normalise: trim, lowercase, drop blanks, de-dup.
 KEEP_CLEAN="$(mktemp)"
-tr 'A-Z' 'a-z' < "$KEEP_LIST" | tr -d ' \t\r' \
-    | grep -E '^[0-9a-f]{64}$' | sort -u > "$KEEP_CLEAN" || true
+tr 'A-Z' 'a-z' < "$KEEP_LIST" | tr -d ' \t\r' | grep -v '^$' | sort -u > "$KEEP_CLEAN" || true
 mv "$KEEP_CLEAN" "$KEEP_LIST"
+# Every entry must be a 64-char hex pubkey. Refuse to continue otherwise:
+# quietly dropping a mistyped key or an npub would delete that author's notes.
+BAD_KEEP="$(grep -vE '^[0-9a-f]{64}$' "$KEEP_LIST" || true)"
+if [ -n "$BAD_KEEP" ]; then
+    echo "error: keep-list entries that are not 64-char hex pubkeys:" >&2
+    printf '%s\n' "$BAD_KEEP" | sed 's/^/  /' >&2
+    exit 2
+fi
 KEEP_COUNT="$(wc -l < "$KEEP_LIST" | tr -d ' ')"
 
 echo "container:  $CONTAINER"
@@ -87,11 +107,19 @@ JQ_PROG='($keep | split("\n") | map(select(length>0))) as $k
          | .id'
 
 # Scan once into a file, then derive both counts from it (no second scan).
-docker exec -i "$CONTAINER" strfry scan '{"kinds":[1,30023]}' > "$RAW_FILE" || true
-jq -r --arg keep "$(cat "$KEEP_LIST")" "$JQ_PROG" < "$RAW_FILE" \
-    | grep -E '^[0-9a-f]{64}$' | sort -u > "$IDS_FILE" || true
+# A failed scan must stop the run: carrying on would report "nothing to
+# delete" for a container that was never actually scanned.
+if ! docker exec -i "$CONTAINER" "$STRFRY_BIN" scan '{"kinds":[1,30023]}' > "$RAW_FILE"; then
+    echo "error: '$STRFRY_BIN scan' failed in container '$CONTAINER'" >&2
+    echo "       (wrong container name, or pass --strfry-bin <path>)" >&2
+    exit 1
+fi
+jq -r --arg keep "$(cat "$KEEP_LIST")" "$JQ_PROG" < "$RAW_FILE" > "$IDS_FILE.raw"
+grep -E '^[0-9a-f]{64}$' "$IDS_FILE.raw" | sort -u > "$IDS_FILE" || true
+rm -f "$IDS_FILE.raw"
 
-TOTAL_SCANNED="$(grep -c . "$RAW_FILE" || echo 0)"
+# grep -c prints 0 AND exits 1 on no match, so `|| echo 0` would yield "0 0".
+TOTAL_SCANNED="$(grep -c . "$RAW_FILE" || true)"
 TO_DELETE="$(wc -l < "$IDS_FILE" | tr -d ' ')"
 echo "stored public notes (kinds 1,30023): $TOTAL_SCANNED"
 echo "to delete (not from an authorized author): $TO_DELETE"
@@ -117,7 +145,7 @@ jq -R -s -c --argjson chunk "$CHUNK" '
 deleted=0
 while IFS= read -r chunk_json; do
     [ -n "$chunk_json" ] || continue
-    docker exec -i "$CONTAINER" strfry delete --filter "$chunk_json"
+    docker exec -i "$CONTAINER" "$STRFRY_BIN" delete --filter "$chunk_json" < /dev/null
     n="$(printf '%s' "$chunk_json" | jq '.ids | length')"
     deleted=$((deleted + n))
     echo "deleted chunk of $n (running total $deleted / $TO_DELETE)"
