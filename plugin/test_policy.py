@@ -13,6 +13,7 @@ Two layers:
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -25,7 +26,7 @@ PLUGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "floonet_write
 PK = "a" * 64
 DEFAULT_KINDS = (
     0, 1, 3, 5, 7, 13, 14, 16, 17, 1059, 1111, 10000, 10002, 10050, 24133,
-    27235, 30000, 30003, 30023, 30078, 30402, 30405, 30406, 31990,
+    24140, 27235, 30000, 30003, 30023, 30078, 30402, 30405, 30406, 31990,
 )
 # npub for PK (the 32-byte key 0xaa..aa); another key for "unauthorized".
 PK_NPUB = "npub1424242424242424242424242424242424242424242424242424qamrcaj"
@@ -135,18 +136,23 @@ class _Authority(BaseHTTPRequestHandler):
 
     paid_pubkeys = set()
     fail = False
+    raw_body = None  # when set, sent verbatim instead of the normal verdict
+    hits = 0
 
     def do_GET(self):
+        _Authority.hits += 1
         if _Authority.fail:
             self.send_response(500)
             self.end_headers()
             return
         pk = self.path.rsplit("/", 1)[-1]
-        body = json.dumps({"pubkey": pk, "paid": pk in _Authority.paid_pubkeys})
+        body = _Authority.raw_body
+        if body is None:
+            body = json.dumps({"pubkey": pk, "paid": pk in _Authority.paid_pubkeys}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(body.encode())
+        self.wfile.write(body)
 
     def log_message(self, *a):
         pass
@@ -167,6 +173,8 @@ class PaidWriteGate(unittest.TestCase):
         wp._paid_cache.clear()
         _Authority.paid_pubkeys = set()
         _Authority.fail = False
+        _Authority.raw_body = None
+        _Authority.hits = 0
 
     def c(self):
         return cfg(pay_mode="write", authority_url=self.url, paid_cache_secs=60.0)
@@ -201,6 +209,79 @@ class PaidWriteGate(unittest.TestCase):
         reply = wp.decide(req(1059, authed=PK), self.c())
         self.assertEqual(reply["action"], "reject")
         self.assertIn("payment status unavailable", reply["msg"])
+
+    def test_non_boolean_paid_verdict_is_not_a_grant(self):
+        # Only a literal JSON true grants. bool("false") is True in Python,
+        # so a truthiness test would have let these through.
+        c = self.c()
+        for junk in ("false", "no", 1, [0], {"paid": False}):
+            wp._paid_cache.clear()
+            _Authority.raw_body = json.dumps({"pubkey": PK, "paid": junk}).encode()
+            reply = wp.decide(req(1059, authed=PK), c)
+            self.assertEqual(reply["action"], "reject", repr(junk))
+            self.assertIn("payment required", reply["msg"])
+
+    def test_non_object_or_oversized_verdict_fails_closed(self):
+        c = self.c()
+        for body in (b"[true]", b"true", b"not json", b'{"paid": true}' + b" " * 70000):
+            wp._paid_cache.clear()
+            _Authority.raw_body = body
+            reply = wp.decide(req(1059, authed=PK), c)
+            self.assertEqual(reply["action"], "reject", body[:20])
+            self.assertIn("payment status unavailable", reply["msg"])
+
+    def test_authed_must_be_lowercase_hex_before_any_lookup(self):
+        # The value goes into the authority URL; anything that is not a
+        # plain pubkey must be refused without a request being made.
+        _Authority.paid_pubkeys = {PK}
+        _Authority.hits = 0
+        for bad in ("A" * 64, "../" * 21 + "x", "a" * 63 + "?", "a" * 63 + "\n", "a" * 64 + "\n"):
+            reply = wp.decide(req(1059, authed=bad), self.c())
+            self.assertEqual(reply["action"], "reject", repr(bad))
+            self.assertIn("auth-required", reply["msg"])
+        self.assertEqual(_Authority.hits, 0)
+
+    def test_paid_cache_is_bounded(self):
+        # Keys are free to mint: cycling through them must not grow the
+        # cache without limit.
+        seen = []
+        orig_lookup, orig_max = wp._paid_lookup, wp._PAID_CACHE_MAX
+        wp._paid_lookup = lambda cfg, pk: seen.append(pk) or True
+        wp._PAID_CACHE_MAX = 50
+        try:
+            c = self.c()
+            for i in range(500):
+                pk = "%064x" % i
+                self.assertEqual(wp.decide(req(1059, authed=pk), c)["action"], "accept")
+                self.assertLessEqual(len(wp._paid_cache), 50)
+            # The newest verdicts survive and are still served from cache.
+            n = len(seen)
+            self.assertEqual(wp.decide(req(1059, authed="%064x" % 499), c)["action"], "accept")
+            self.assertEqual(len(seen), n)
+            # An evicted key just costs one fresh lookup.
+            self.assertEqual(wp.decide(req(1059, authed="%064x" % 0), c)["action"], "accept")
+            self.assertEqual(len(seen), n + 1)
+        finally:
+            wp._paid_lookup, wp._PAID_CACHE_MAX = orig_lookup, orig_max
+
+    def test_paid_cache_evicts_expired_entries_first(self):
+        orig_max = wp._PAID_CACHE_MAX
+        wp._PAID_CACHE_MAX = 3
+        try:
+            wp._paid_cache_store("live1", True, 100.0, 0.0)
+            wp._paid_cache_store("dead", True, 5.0, 0.0)
+            wp._paid_cache_store("live2", True, 100.0, 0.0)
+            wp._paid_cache_store("new", True, 100.0, 10.0)
+            self.assertEqual(sorted(wp._paid_cache), ["live1", "live2", "new"])
+        finally:
+            wp._PAID_CACHE_MAX = orig_max
+
+    def test_bad_cache_ttl_refused_at_startup(self):
+        for bad in ("nan", "inf", "-inf", "-1", "soon", ""):
+            with self.assertRaises(SystemExit, msg=repr(bad)):
+                wp.load_config(env={"FLOONET_PAID_CACHE_SECS": bad})
+        self.assertEqual(wp.load_config(env={"FLOONET_PAID_CACHE_SECS": "0"})["paid_cache_secs"], 0.0)
+        self.assertEqual(wp.load_config(env={"FLOONET_PAID_CACHE_SECS": " 30 "})["paid_cache_secs"], 30.0)
 
     def test_kind_check_still_first_in_write_mode(self):
         _Authority.paid_pubkeys = {PK}
@@ -356,6 +437,31 @@ class GiftWrapRetention(unittest.TestCase):
         self.assertEqual(reply["action"], "reject")
         self.assertIn("extraneous tags", reply["msg"])
 
+    def test_bare_p_tag_padding_rejected(self):
+        # The recipient check only counts `p` tags that carry a value, so
+        # value-less ["p"] tags used to ride along uncounted, defeating the
+        # one-tag rule with up to maxNumTags of padding.
+        for pad in (1, 1900):
+            r = req(1059, tags=[["p", OTHER_PK]] + [["p"]] * pad)
+            reply = wp.decide(r, cfg())
+            self.assertEqual(reply["action"], "reject", pad)
+            self.assertIn("extraneous tags", reply["msg"])
+        r = req(1059, tags=[["p"]] * 3 + [["p", OTHER_PK]])
+        self.assertEqual(wp.decide(r, cfg())["action"], "reject")
+
+    def test_p_tag_with_relay_hint_still_accepted(self):
+        # NIP-59 allows a relay hint as a third element of the one `p` tag.
+        r = req(1059, tags=[["p", OTHER_PK, "wss://relay.example"]])
+        self.assertEqual(wp.decide(r, cfg())["action"], "accept")
+
+    def test_p_tag_with_trailing_newline_rejected(self):
+        # `$` matches before a trailing newline, so "^[0-9a-f]{64}$" admitted
+        # a 65-character recipient no reader could ever match.
+        for bad in (OTHER_PK + "\n", "\n" + OTHER_PK, OTHER_PK + " "):
+            reply = wp.decide(req(1059, tags=[["p", bad]]), cfg())
+            self.assertEqual(reply["action"], "reject", repr(bad))
+            self.assertIn("missing recipient", reply["msg"])
+
     def test_non_giftwrap_with_many_tags_unaffected(self):
         # The tag ceiling is 1059-only; other kinds are free to carry as
         # many tags as they like.
@@ -454,6 +560,36 @@ class StrfryPipeProtocol(unittest.TestCase):
         replies = [json.loads(out) for out in proc.stdout.splitlines()]
         self.assertEqual(replies[0]["action"], "reject")
         self.assertEqual((replies[1]["id"], replies[1]["action"]), ("after", "accept"))
+
+    def test_hostile_lines_fail_closed_and_loop_survives(self):
+        # Force a strict UTF-8 stdin, which is what a normal UTF-8 locale
+        # gives (the C locale hides this with surrogateescape). Invalid bytes
+        # used to raise out of readline() and kill the plugin.
+        hostile = [
+            b'{"type":"new","event":{"id":"\xff\xfe","kind":1059}}',
+            b"\xff\xfe\x00garbage",
+            b"\x00",
+            b"[" * 200000,                                     # RecursionError
+            b'{"event":{"kind":' + b"9" * 100000 + b"}}",      # int digit limit
+            b"[]",
+            b'"event"',
+            b"null",
+            b'{"event":{"id":["x"],"kind":{"a":1},"tags":7}}',
+        ]
+        after = json.dumps(req(1059, event_id="after")).encode()
+        proc = subprocess.run(
+            [sys.executable, PLUGIN],
+            input=b"\n".join(hostile) + b"\n" + after + b"\n",
+            capture_output=True,
+            timeout=60,
+            env={"PATH": os.environ.get("PATH", ""), "PYTHONIOENCODING": "utf-8:strict"},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr[-500:])
+        replies = [json.loads(out) for out in proc.stdout.splitlines()]
+        self.assertEqual(len(replies), len(hostile) + 1)
+        for r in replies[:-1]:
+            self.assertEqual(r["action"], "reject")
+        self.assertEqual((replies[-1]["id"], replies[-1]["action"]), ("after", "accept"))
 
     def test_env_whitelist_respected_over_the_wire(self):
         replies = self.run_plugin(
