@@ -7,12 +7,23 @@
 #
 # Pinned for reproducibility. Bump STRFRY_REF to a newer upstream commit to
 # update strfry; nothing else changes, since the source is never touched.
+#
+# TLS library: OpenSSL, in both stages. strfry builds against either OpenSSL
+# or LibreSSL without source changes (upstream's own ubuntu.Dockerfile and
+# its documented build deps use OpenSSL's libssl-dev). Alpine's base image,
+# apk and python3 already depend on OpenSSL's libssl3/libcrypto3, so this
+# keeps one TLS stack in the image, and those package names are stable for
+# the whole OpenSSL 3.x line. LibreSSL's runtime packages are named after
+# its version (libressl4.3-libssl on Alpine 3.24), which breaks the build at
+# every LibreSSL bump; the plain `libressl` package no longer ships the
+# shared libraries at all. The `ldd` step below turns any future mismatch
+# into a failed build rather than a relay that dies at start.
 FROM alpine:3.24 AS build
 ENV TZ=Europe/London
 WORKDIR /build
 RUN apk --no-cache add \
         linux-headers git g++ make perl pkgconfig libtool ca-certificates \
-        libressl-dev zlib-dev lmdb-dev flatbuffers-dev libsecp256k1-dev zstd-dev
+        openssl-dev zlib-dev lmdb-dev flatbuffers-dev libsecp256k1-dev zstd-dev
 ARG STRFRY_REF=4cd3cf64850caf47dda46c2a2abbbf3525a64d10
 RUN git clone https://github.com/hoytech/strfry . \
     && git checkout "${STRFRY_REF}" \
@@ -26,9 +37,13 @@ WORKDIR /app
 # flushes explicitly, so this is belt-and-suspenders against buffering stalls.
 ENV PYTHONUNBUFFERED=1
 RUN apk --no-cache add \
-        lmdb flatbuffers libsecp256k1 libb2 zstd libressl4.3-libssl libressl4.3-libcrypto python3 \
+        lmdb flatbuffers libsecp256k1 libb2 zstd libssl3 libcrypto3 python3 \
     && rm -rf /var/cache/apk/*
 COPY --from=build /build/strfry /app/strfry
+# Fail the build, not the deploy, if a shared library the binary needs is
+# missing from this stage (musl's ldd exits non-zero on an unresolved
+# library or symbol).
+RUN ldd /app/strfry && /app/strfry --version
 COPY plugin/floonet_writepolicy.py /usr/local/bin/floonet_writepolicy.py
 # Run as a fixed non-root uid: the relay takes untrusted network input, so
 # drop privilege. Only the db dir needs to be owned by that uid (the binary
