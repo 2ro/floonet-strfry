@@ -28,7 +28,13 @@ services:
     environment:
       # Write policy plugin configuration (the plugin inherits strfry's
       # environment). See plugin/floonet_writepolicy.py and .env.example.
-      FLOONET_ALLOWED_KINDS: ${FLOONET_ALLOWED_KINDS:-0,3,5,13,1059,10002,10050,27235}
+      # The fallback here REPLACES the plugin's built-in default whenever
+      # .env leaves FLOONET_ALLOWED_KINDS unset, so it must be the same list
+      # as DEFAULT_ALLOWED_KINDS in the plugin (plugin/test_policy.py checks).
+      FLOONET_ALLOWED_KINDS: ${FLOONET_ALLOWED_KINDS:-0,1,3,5,7,13,14,16,17,1059,1111,10000,10002,10050,24133,24140,27235,30000,30003,30023,30078,30402,30405,30406,31990}
+      # Authors allowed to post the locked public-note kinds (1, 30023).
+      # Empty = closed for everyone.
+      FLOONET_AUTHORIZED_AUTHORS: ${FLOONET_AUTHORIZED_AUTHORS:-}
       FLOONET_REQUIRE_AUTH: ${FLOONET_REQUIRE_AUTH:-false}
       FLOONET_PAY_MODE: ${FLOONET_PAY_MODE:-off}
       FLOONET_AUTHORITY_URL: http://authority:8191

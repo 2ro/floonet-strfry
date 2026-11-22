@@ -112,6 +112,46 @@ class KindWhitelist(unittest.TestCase):
             wp.load_config(env={"FLOONET_ALLOWED_KINDS": "0,x"})
 
 
+class DefaultsStayInSync(unittest.TestCase):
+    """The default whitelist is written down in three places. They drifted
+    once (compose shipped an 8-kind default that silently replaced the
+    plugin's), so pin them together."""
+
+    REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def plugin_default(self):
+        return sorted(int(k) for k in wp.DEFAULT_ALLOWED_KINDS.split(","))
+
+    def read(self, name):
+        path = os.path.join(self.REPO, name)
+        if not os.path.exists(path):
+            self.skipTest("%s not available (plugin dir tested standalone)" % name)
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_test_table_matches_plugin_default(self):
+        self.assertEqual(sorted(DEFAULT_KINDS), self.plugin_default())
+
+    def test_compose_default_matches_plugin_default(self):
+        m = re.search(
+            r"FLOONET_ALLOWED_KINDS:\s*\$\{FLOONET_ALLOWED_KINDS:-([0-9,]+)\}",
+            self.read("docker-compose.yml"),
+        )
+        self.assertIsNotNone(m, "compose no longer sets a whitelist default")
+        self.assertEqual(sorted(int(k) for k in m.group(1).split(",")), self.plugin_default())
+
+    def test_compose_passes_authorized_authors_to_the_relay(self):
+        self.assertIn(
+            "FLOONET_AUTHORIZED_AUTHORS: ${FLOONET_AUTHORIZED_AUTHORS:-}",
+            self.read("docker-compose.yml"),
+        )
+
+    def test_env_example_documents_plugin_default(self):
+        m = re.search(r"^#FLOONET_ALLOWED_KINDS=([0-9,]+)$", self.read(".env.example"), re.M)
+        self.assertIsNotNone(m)
+        self.assertEqual(sorted(int(k) for k in m.group(1).split(",")), self.plugin_default())
+
+
 class AuthRequirement(unittest.TestCase):
     def test_off_by_default(self):
         self.assertEqual(wp.decide(req(1059), cfg())["action"], "accept")
